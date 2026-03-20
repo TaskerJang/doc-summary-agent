@@ -16,13 +16,21 @@ def parse_libhwp(hwp_path: Path) -> str:
     """
     libhwp: .hwp 전용 (텍스트·표 추출)
     ⚠️  라이브러리 실제 동작 검증 필요 (기능정의서 REQ-03 비고)
+    API: libhwp.HWPReader 사용 (libhwp.load() 없음)
     """
     try:
-        import libhwp
-        doc = libhwp.load(str(hwp_path))
-        return doc.get_text()
+        from libhwp import HWPReader
+        reader = HWPReader(str(hwp_path))
+        lines = []
+        for paragraph in reader.get_paragraphs():
+            text = str(paragraph).strip()
+            if text:
+                lines.append(text)
+        return "\n".join(lines)
     except ImportError:
         return "[libhwp] 라이브러리 미설치 — uv add libhwp 실행 필요"
+    except Exception as e:
+        return f"[libhwp] 파싱 실패: {e}"
 
 
 # ── 2. python-hwpx (.hwpx, ZIP+XML 기반) ─────────────────────
