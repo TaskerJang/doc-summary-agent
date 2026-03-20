@@ -1,4 +1,9 @@
-.env 
-.venv/ 
-__pycache__/ 
-*.pyc 
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Step1 파서 테스트 — 실제 문서 및 파싱 결과 (로컬에만 보관)
+tests/step1_parser/sample_docs/*
+!tests/step1_parser/sample_docs/.gitkeep
+tests/step1_parser/output/
