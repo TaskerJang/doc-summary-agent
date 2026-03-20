@@ -29,7 +29,6 @@ def parse_pdfplumber(pdf_path: Path) -> str:
             text = page.extract_text()
             if text:
                 lines.append(text)
-            # 표 추출
             for table in page.extract_tables():
                 for row in table:
                     lines.append(" | ".join(cell or "" for cell in row))

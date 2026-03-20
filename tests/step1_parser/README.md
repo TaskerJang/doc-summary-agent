@@ -24,10 +24,10 @@ uv add pymupdf4llm pdfplumber pypdf python-docx docx2python
 #    (gitignore 처리 — 실제 문서는 로컬에만 보관)
 
 # 3. 전체 실행
-python tests/step1_parser/run_all.py
+uv run python tests/step1_parser/run_all.py
 
 # 또는 개별 실행
-python tests/step1_parser/test_pdf_parsers.py
+uv run python tests/step1_parser/test_pdf_parsers.py
 ```
 
 ## 평가 기준 (기능정의서 v0.1)

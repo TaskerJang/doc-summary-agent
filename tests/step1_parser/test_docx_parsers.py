@@ -69,7 +69,6 @@ def run():
             print(f"[SKIP] 문서 없음: {doc_path.name}")
             continue
 
-        # .doc → .docx 변환
         if doc_path.suffix.lower() == ".doc":
             print(f"🔄 LibreOffice 변환 중: {doc_path.name}")
             try:
