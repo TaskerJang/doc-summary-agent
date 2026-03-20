@@ -16,7 +16,7 @@ def parse_libhwp(hwp_path: Path) -> str:
     """
     libhwp: .hwp 전용 (텍스트·표 추출)
     ⚠️  라이브러리 실제 동작 검증 필요 (기능정의서 REQ-03 비고)
-    API: libhwp.HWPReader 사용 (libhwp.load() 없음)
+    ⚠️  pyo3 Rust 패닉은 BaseException으로만 잡힘 — Exception으로는 잡히지 않음
     """
     try:
         from libhwp import HWPReader
@@ -29,8 +29,9 @@ def parse_libhwp(hwp_path: Path) -> str:
         return "\n".join(lines)
     except ImportError:
         return "[libhwp] 라이브러리 미설치 — uv add libhwp 실행 필요"
-    except Exception as e:
-        return f"[libhwp] 파싱 실패: {e}"
+    except BaseException as e:
+        # Rust(pyo3) 레벨 패닉은 PanicException으로 발생 → BaseException으로만 포착 가능
+        return f"[libhwp] 파싱 실패 (Rust 패닉): {e}"
 
 
 # ── 2. python-hwpx (.hwpx, ZIP+XML 기반) ─────────────────────
@@ -80,7 +81,7 @@ def run():
                 out.write_text(result, encoding="utf-8")
                 print(f"✅ {elapsed:.2f}s | {len(result):,}자 → {out.name}")
 
-            except Exception as e:
+            except BaseException as e:
                 print(f"❌ 실패: {e}")
                 traceback.print_exc()
 
