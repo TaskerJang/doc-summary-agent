@@ -50,13 +50,21 @@ def parse_python_docx(docx_path: Path) -> str:
 # ── 2. docx2python ────────────────────────────────────────────
 def parse_docx2python(docx_path: Path) -> str:
     from docx2python import docx2python
+
+    def flatten(obj) -> str:
+        """중첩 리스트를 재귀적으로 평탄화해서 문자열로 반환"""
+        if isinstance(obj, str):
+            return obj
+        if isinstance(obj, list):
+            return "\n".join(flatten(item) for item in obj if item)
+        return str(obj)
+
     result = docx2python(docx_path)
     lines = []
     for section in result.body:
-        for paragraph in section:
-            for run in paragraph:
-                if run.strip():
-                    lines.append(run)
+        text = flatten(section).strip()
+        if text:
+            lines.append(text)
     return "\n".join(lines)
 
 
