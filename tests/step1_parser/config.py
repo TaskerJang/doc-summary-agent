@@ -11,11 +11,18 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ── 테스트 문서 (기능정의서 Input 정의 기준) ─────────────────
 DOCS = {
-    "pdf_miraeasset":  SAMPLE_DIR / "미래에셋증권_실적보고서.pdf",
-    "pdf_ds":          SAMPLE_DIR / "DS투자증권_시황분석리포트.pdf",
-    "pdf_hanwha":      SAMPLE_DIR / "한화투자증권_두산밥캣_기업분석.pdf",
-    "doc_fss":         SAMPLE_DIR / "금융감독원_보도자료.doc",
-    "hwp_nonghyup":    SAMPLE_DIR / "농협_2022년_사업보고서.hwp",
+    # PDF — 미래에셋증권 실적보고서 (1~4분기)
+    "pdf_miraeasset_1q": SAMPLE_DIR / "미래에셋증권 1분기 실적보고서.pdf",
+    "pdf_miraeasset_2q": SAMPLE_DIR / "미래에셋증권 2분기 실적보고서.pdf",
+    "pdf_miraeasset_3q": SAMPLE_DIR / "미래에셋증권 3분기 실적보고서.pdf",
+    "pdf_miraeasset_4q": SAMPLE_DIR / "미래에셋증권 4분기 실적보고서.pdf",
+    # PDF — 리포트
+    "pdf_ds":            SAMPLE_DIR / "DS투자증권 시황분석 리포트.pdf",
+    "pdf_hanwha":        SAMPLE_DIR / "한화투자증권 두산밥캣 기업분석 리포트.pdf",
+    # DOC
+    "doc_fss":           SAMPLE_DIR / "금융감독원 251125_(보도자료) 25.10월중 기업의 직접금융 조달실적.doc",
+    # HWP
+    "hwp_nonghyup":      SAMPLE_DIR / "농협 2022년 9월말 기준 사업보고서.hwp",
 }
 
 # 결과 저장 경로
