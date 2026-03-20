@@ -6,17 +6,24 @@ DOCX 파서 비교 테스트
 ⚠️  LLM·VLM 사용 금지
 """
 import subprocess
+import sys
 import time
 import traceback
 from pathlib import Path
 from config import DOCS, output_path
+
+# ── LibreOffice 실행 경로 (Windows PATH 미설정 시 직접 지정) ──────
+if sys.platform == "win32":
+    LIBREOFFICE_BIN = r"C:\Program Files\LibreOffice\program\soffice.exe"
+else:
+    LIBREOFFICE_BIN = "libreoffice"
 
 
 def convert_doc_to_docx(doc_path: Path) -> Path:
     """LibreOffice CLI로 .doc → .docx 변환"""
     out_dir = doc_path.parent
     result = subprocess.run(
-        ["libreoffice", "--headless", "--convert-to", "docx",
+        [LIBREOFFICE_BIN, "--headless", "--convert-to", "docx",
          "--outdir", str(out_dir), str(doc_path)],
         capture_output=True, text=True
     )
