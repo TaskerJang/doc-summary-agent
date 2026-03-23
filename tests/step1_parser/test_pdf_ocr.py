@@ -8,14 +8,23 @@
   uv add pytesseract pymupdf Pillow
   # tesseract 바이너리 + 한국어 언어팩
   # Windows: https://github.com/UB-Mannheim/tesseract/wiki
-  #   → 설치 시 'Korean' 체크박스 선택
+  #   → 설치 시 'Korean' 체크박스 선택 또는 kor.traineddata 수동 추가
   # macOS:   brew install tesseract tesseract-lang
   # Ubuntu:  apt install tesseract-ocr tesseract-ocr-kor
 """
+import os
 import time
 import traceback
 from pathlib import Path
 from config import DOCS, output_path
+
+# ── Windows tesseract 경로 직접 지정 ──────────────────────────
+# PATH에 등록되지 않은 경우를 대비해 기본 설치 경로를 명시한다.
+# 설치 위치가 다르면 아래 경로를 수정하세요.
+_TESSERACT_WINDOWS_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+if os.name == "nt" and Path(_TESSERACT_WINDOWS_PATH).exists():
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = _TESSERACT_WINDOWS_PATH
 
 # 이미지 기반 PDF 키 목록 (미래에셋 1~3Q 가 이미지 기반으로 확인됨)
 IMAGE_PDF_KEYS = ["pdf_miraeasset_1q", "pdf_miraeasset_2q", "pdf_miraeasset_3q"]
@@ -70,11 +79,13 @@ def check_dependencies() -> bool:
         import fitz
         import pytesseract
         from PIL import Image
-        pytesseract.get_tesseract_version()
+        ver = pytesseract.get_tesseract_version()
+        print(f"  tesseract 버전: {ver}")
         return True
     except Exception as e:
         print(f"[의존성 오류] {e}")
-        print("  → tesseract 설치 및 PATH 등록 여부를 확인하세요.")
+        print(f"  → tesseract 경로 확인: {_TESSERACT_WINDOWS_PATH}")
+        print("  → 설치 경로가 다르면 _TESSERACT_WINDOWS_PATH 값을 수정하세요.")
         return False
 
 
