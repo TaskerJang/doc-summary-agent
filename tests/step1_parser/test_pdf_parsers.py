@@ -1,13 +1,17 @@
 """
 PDF 파서 비교 테스트
-대상 라이브러리: pymupdf4llm / pdfplumber / PyPDF2 (pypdf)
+대상 라이브러리: pymupdf4llm / pdfplumber / PyPDF2 (pypdf) / parser.pdf (모듈)
 
 ⚠️  LLM·VLM 사용 금지 — 순수 Python 파싱만 사용 (REQ-01)
 """
+import sys
 import time
 import traceback
 from pathlib import Path
 from config import DOCS, output_path
+
+# parser/ 패키지 import를 위해 루트 경로 추가
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 PDF_DOCS = {
     k: v for k, v in DOCS.items() if k.startswith("pdf_")
@@ -44,12 +48,19 @@ def parse_pypdf2(pdf_path: Path) -> str:
     )
 
 
+# ── 4. parser.pdf 모듈 ────────────────────────────────────────
+def parse_module(pdf_path: Path) -> str:
+    from parser.pdf import parse
+    return parse(pdf_path)
+
+
 # ── 실행 ─────────────────────────────────────────────────────
 def run():
     parsers = {
         "pymupdf4llm": parse_pymupdf4llm,
         "pdfplumber":  parse_pdfplumber,
         "PyPDF2":      parse_pypdf2,
+        "pdf_module":  parse_module,       # parser/pdf.py 모듈 테스트
     }
 
     for doc_key, doc_path in PDF_DOCS.items():
