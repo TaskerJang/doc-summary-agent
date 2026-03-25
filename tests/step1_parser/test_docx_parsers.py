@@ -12,11 +12,16 @@ import traceback
 from pathlib import Path
 from config import DOCS, output_path
 
-# ── LibreOffice 실행 경로 (Windows PATH 미설정 시 직접 지정) ──────
 if sys.platform == "win32":
     LIBREOFFICE_BIN = r"C:\Program Files\LibreOffice\program\soffice.exe"
 else:
     LIBREOFFICE_BIN = "libreoffice"
+
+_HEADING_PREFIX = {
+    "Heading 1": "# ",
+    "Heading 2": "## ",
+    "Heading 3": "### ",
+}
 
 
 def convert_doc_to_docx(doc_path: Path) -> Path:
@@ -25,25 +30,34 @@ def convert_doc_to_docx(doc_path: Path) -> Path:
     result = subprocess.run(
         [LIBREOFFICE_BIN, "--headless", "--convert-to", "docx",
          "--outdir", str(out_dir), str(doc_path)],
-        capture_output=True, text=True
+        capture_output=True, text=True,
     )
     if result.returncode != 0:
         raise RuntimeError(f"LibreOffice 변환 실패: {result.stderr}")
-    return doc_path.with_suffix(".docx")
+    converted = doc_path.with_suffix(".docx")
+    if not converted.exists():
+        raise FileNotFoundError(f"변환 결과 파일 없음: {converted}")
+    return converted
 
 
 # ── 1. python-docx ────────────────────────────────────────────
 def parse_python_docx(docx_path: Path) -> str:
     from docx import Document
+
     doc = Document(docx_path)
     lines = []
+
     for para in doc.paragraphs:
-        if para.text.strip():
-            prefix = "## " if para.style.name.startswith("Heading") else ""
-            lines.append(f"{prefix}{para.text}")
+        text = para.text.strip()
+        if not text:
+            continue
+        prefix = _HEADING_PREFIX.get(para.style.name, "")
+        lines.append(f"{prefix}{text}")
+
     for table in doc.tables:
         for row in table.rows:
             lines.append(" | ".join(cell.text.strip() for cell in row.cells))
+
     return "\n".join(lines)
 
 
@@ -52,7 +66,6 @@ def parse_docx2python(docx_path: Path) -> str:
     from docx2python import docx2python
 
     def flatten(obj) -> str:
-        """중첩 리스트를 재귀적으로 평탄화해서 문자열로 반환"""
         if isinstance(obj, str):
             return obj
         if isinstance(obj, list):
@@ -68,10 +81,10 @@ def parse_docx2python(docx_path: Path) -> str:
     return "\n".join(lines)
 
 
-# ── 실행 ─────────────────────────────────────────────────────
+# ── 실행 ──────────────────────────────────────────────────────
 def run():
     parsers = {
-        "python-docx":  parse_python_docx,
+        "python-docx": parse_python_docx,
         "docx2python":  parse_docx2python,
     }
 

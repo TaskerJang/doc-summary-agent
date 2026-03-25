@@ -1,60 +1,131 @@
 """
 HWP 파서 비교 테스트
-대상 라이브러리: libhwp / python-hwpx
+대상:
+  A. pyhwp (hwp5html)  ← 최종 선정 (순수 Python, LibreOffice 불필요)
+  B. LibreOffice CLI   ← 실패 기록용
+  C. libhwp            ← Rust 패닉 기록용
+  D. python-hwpx       ← .hwp 미지원 기록용
 
-.hwp 와 .hwpx 는 포맷 구조가 달라 별도 처리 (REQ-03)
 ⚠️  LLM·VLM 사용 금지
 """
+import html
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
 from config import DOCS, output_path
 
+if sys.platform == "win32":
+    LIBREOFFICE_BIN = r"C:\Program Files\LibreOffice\program\soffice.exe"
+else:
+    LIBREOFFICE_BIN = "libreoffice"
 
-# ── 1. libhwp (.hwp) ─────────────────────────────────────────
+_HEADING_PREFIX = {
+    "Heading 1": "# ",
+    "Heading 2": "## ",
+    "Heading 3": "### ",
+}
+
+
+# ── A. pyhwp (hwp5html) ───────────────────────────────────────
+def parse_pyhwp(hwp_path: Path) -> str:
+    """hwp5html로 임시 디렉토리에 xhtml 출력 후 텍스트·표 파싱"""
+    tmp_dir = Path(tempfile.mkdtemp())
+    try:
+        result = subprocess.run(
+            ["hwp5html", "--output", str(tmp_dir), str(hwp_path)],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            raise RuntimeError(f"hwp5html 실패: {stderr}")
+
+        html_files = sorted(tmp_dir.rglob("*.xhtml")) or sorted(tmp_dir.rglob("*.html"))
+        if not html_files:
+            raise FileNotFoundError("hwp5html 출력 파일 없음")
+
+        sections = []
+        for html_file in html_files:
+            raw = html_file.read_text(encoding="utf-8", errors="replace")
+            text = re.sub(r"<[^>]+>", " ", raw)
+            text = html.unescape(text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            text = re.sub(r" {2,}", " ", text)
+            sections.append(text.strip())
+
+        return "\n\n".join(sections)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ── B. LibreOffice CLI (실패 기록용) ──────────────────────────
+def parse_libreoffice(hwp_path: Path) -> str:
+    from docx import Document
+
+    out_dir = hwp_path.parent
+    result = subprocess.run(
+        [LIBREOFFICE_BIN, "--headless", "--convert-to", "docx",
+         "--outdir", str(out_dir), str(hwp_path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"LibreOffice 변환 실패: {result.stderr}")
+    docx_path = hwp_path.with_suffix(".docx")
+    if not docx_path.exists():
+        raise FileNotFoundError(f"변환 결과 파일 없음: {docx_path}")
+    try:
+        doc = Document(docx_path)
+        lines = []
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                continue
+            prefix = _HEADING_PREFIX.get(para.style.name, "")
+            lines.append(f"{prefix}{text}")
+        for table in doc.tables:
+            for row in table.rows:
+                lines.append(" | ".join(cell.text.strip() for cell in row.cells))
+        return "\n".join(lines)
+    finally:
+        if docx_path.exists():
+            docx_path.unlink()
+
+
+# ── C. libhwp (Rust 패닉 기록용) ─────────────────────────────
 def parse_libhwp(hwp_path: Path) -> str:
-    """
-    libhwp: .hwp 전용 (텍스트·표 추출)
-    ⚠️  라이브러리 실제 동작 검증 필요 (기능정의서 REQ-03 비고)
-    ⚠️  pyo3 Rust 패닉은 BaseException으로만 잡힘 — Exception으로는 잡히지 않음
-    """
     try:
         from libhwp import HWPReader
         reader = HWPReader(str(hwp_path))
-        lines = []
-        for paragraph in reader.get_paragraphs():
-            text = str(paragraph).strip()
-            if text:
-                lines.append(text)
+        lines = [str(p).strip() for p in reader.get_paragraphs() if str(p).strip()]
         return "\n".join(lines)
     except ImportError:
-        return "[libhwp] 라이브러리 미설치 — uv add libhwp 실행 필요"
+        return "[libhwp] 미설치"
     except BaseException as e:
-        # Rust(pyo3) 레벨 패닉은 PanicException으로 발생 → BaseException으로만 포착 가능
-        return f"[libhwp] 파싱 실패 (Rust 패닉): {e}"
+        return f"[libhwp] Rust 패닉: {e}"
 
 
-# ── 2. python-hwpx (.hwpx, ZIP+XML 기반) ─────────────────────
+# ── D. python-hwpx (.hwp 미지원 기록용) ──────────────────────
 def parse_python_hwpx(hwp_path: Path) -> str:
-    """
-    python-hwpx: .hwpx 전용 (순수 Python, ZIP+XML)
-    .hwp 입력 시 변환 불가 → 결과에 명시
-    """
     if hwp_path.suffix.lower() == ".hwp":
-        return "[python-hwpx] .hwp 미지원 — .hwpx 파일 필요"
+        return "[python-hwpx] .hwp 미지원 — .hwpx 전용 라이브러리"
     try:
         import hwpx
-        doc = hwpx.load(str(hwp_path))
-        return doc.get_text()
+        return hwpx.load(str(hwp_path)).get_text()
     except ImportError:
-        return "[python-hwpx] 라이브러리 미설치 — uv add python-hwpx 실행 필요"
+        return "[python-hwpx] 미설치"
 
 
-# ── 실행 ─────────────────────────────────────────────────────
+# ── 실행 ──────────────────────────────────────────────────────
 def run():
     parsers = {
-        "libhwp":       parse_libhwp,
-        "python-hwpx":  parse_python_hwpx,
+        "pyhwp":       parse_pyhwp,        # 최종 선정
+        "libreoffice": parse_libreoffice,   # 실패 기록용
+        "libhwp":      parse_libhwp,        # 실패 기록용
+        "python-hwpx": parse_python_hwpx,   # 실패 기록용
     }
 
     hwp_targets = {
