@@ -7,3 +7,6 @@ __pycache__/
 tests/step1_parser/sample_docs/*
 !tests/step1_parser/sample_docs/.gitkeep
 tests/step1_parser/output/
+
+# Step1 파서 테스트 — hwp5html 임시 출력 찌꺼기
+tests/step1_parser/-/
