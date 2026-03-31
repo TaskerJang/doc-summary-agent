@@ -10,3 +10,6 @@ tests/step1_parser/output/
 
 # Step1 파서 테스트 — hwp5html 임시 출력 찌꺼기
 tests/step1_parser/-/
+
+.ocr_cache/
+tests/step1_parser/picture/
