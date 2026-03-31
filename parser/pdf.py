@@ -1,12 +1,28 @@
 from pathlib import Path
+import re
+from parser.ocr_cache import extract_text_with_cache
+
+
+def _is_image_based_pdf(pdf_path: Path) -> bool:
+    """
+    페이지당 평균 텍스트가 200자 미만이면 이미지 기반 PDF로 판단
+    """
+    import fitz
+    doc = fitz.open(str(pdf_path))
+    total_text = sum(len(page.get_text().strip()) for page in doc)
+    avg_text_per_page = total_text / len(doc)
+    return avg_text_per_page < 500
+
 
 def parse(pdf_path: Path) -> str:
     """
-    진입점 — 외부에서 유일하게 호출하는 함수
-    pymupdf4llm 시도 → 결과 없으면 pdfplumber fallback
-
-    TODO: 이미지 기반 페이지 OCR 처리 전략은 3/26 1차 보고 후 결정
+    진입점 — 이미지 기반 PDF 여부를 먼저 판단 후 파싱 전략 결정
+    이미지 기반 (80% 이상) → OCR
+    텍스트 기반 → pymupdf4llm → pdfplumber fallback
     """
+    if _is_image_based_pdf(pdf_path):
+        return _parse_ocr(pdf_path)
+
     text = _parse_pymupdf4llm(pdf_path)
 
     if not text.strip():
@@ -26,6 +42,7 @@ def parse_bytes(data: bytes, filename: str = "upload.pdf") -> str:
         tmp.write(data)
         tmp.flush()
         return parse(Path(tmp.name))
+
 
 def _is_image_based_page(page) -> bool:
     """페이지 하나를 받아 이미지 기반인지 True/False 반환"""
@@ -56,6 +73,12 @@ def _parse_pymupdf4llm(pdf_path: Path) -> str:
         show_progress=False,
         table_strategy="lines_strict",
     )
+
+
+def _parse_ocr(pdf_path: Path) -> str:
+    """이미지 기반 PDF → EasyOCR + 캐시"""
+    pages = extract_text_with_cache(pdf_path)
+    return "\n\n".join(pages)
 
 
 def _parse_pdfplumber(pdf_path: Path) -> str:
