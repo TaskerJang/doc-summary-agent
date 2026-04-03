@@ -5,10 +5,10 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-import parser as doc_parser
-from parser.preprocessor import clean
-from parser.metadata import extract
-from parser.pdf import _is_image_based_pdf
+import doc_parser
+from doc_parser.preprocessor import clean
+from doc_parser.metadata import extract
+from doc_parser.pdf import is_image_based_pdf
 from chunker.chunker import chunk
 from summarizer.llm import summarize
 
@@ -69,7 +69,7 @@ def run(path: Path, no_summary: bool = False) -> dict:
     is_image_based = False
     try:
         if path.suffix.lower() == ".pdf":
-            is_image_based = _is_image_based_pdf(path)
+            is_image_based = is_image_based_pdf(path)  # public 함수 직접 호출
         text = doc_parser.parse(path)
         result["parse_len"] = len(text)
         result["is_image_based"] = is_image_based
@@ -148,16 +148,15 @@ def run(path: Path, no_summary: bool = False) -> dict:
     except Exception as e:
         logger.error("요약 실패: %s", e, exc_info=True)
         result.update({
-            "status": "partial",  # error → partial (파싱/청킹은 성공)
+            "status": "partial",
             "summary_error": str(e),
-            "summary": {  # 빈 폴백 결과 — UI에서 에러 표시용
+            "summary": {
                 "overall": "[요약 생성 실패]",
                 "sections": [],
                 "is_image_based": is_image_based,
             }
         })
         print(f"  요약 실패   ❌ {e}")
-        # return 없음 — elapsed 로깅 및 완료 메시지까지 정상 진행
 
     elapsed = (datetime.now() - started_at).total_seconds()
     logger.info("파이프라인 완료 — %.1fs", elapsed)
@@ -181,7 +180,6 @@ def main() -> None:
     result = run(path, no_summary=args.no_summary)
 
     if args.json:
-        # chunks는 용량 커서 JSON 출력 시 제외
         output = {k: v for k, v in result.items() if k != "chunks"}
         print(json.dumps(output, ensure_ascii=False, indent=2))
 

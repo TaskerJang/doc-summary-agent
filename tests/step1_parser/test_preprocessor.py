@@ -15,16 +15,15 @@ import re
 import sys
 from pathlib import Path
 
-# parser/ 패키지 import를 위해 루트 경로 추가
+# doc_parser/ 패키지 import를 위해 루트 경로 추가
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from parser.preprocessor import clean
+from doc_parser.preprocessor import clean
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 
 
 def _read(filename: str) -> str | None:
-    """output 파일을 읽어 반환. 파일이 없으면 None."""
     path = OUTPUT_DIR / filename
     if not path.exists():
         print(f"  [SKIP] 파일 없음: {filename}")
@@ -33,190 +32,94 @@ def _read(filename: str) -> str | None:
 
 
 def _save(filename: str, text: str) -> None:
-    """clean 결과를 output 폴더에 저장."""
     path = OUTPUT_DIR / filename
     path.write_text(text, encoding="utf-8")
 
 
 def _report(label: str, raw: str, cleaned: str) -> None:
-    """before/after 글자 수 및 감소율 출력."""
     before = len(raw)
     after = len(cleaned)
     ratio = (1 - after / before) * 100 if before else 0
     print(f"  {label}: {before:,}자 → {after:,}자 ({ratio:.1f}% 감소)")
 
 
-# ─────────────────────────────────────────────────────────────
-# ① pdf_ds — DS투자증권 시황분석 리포트
-# ─────────────────────────────────────────────────────────────
 def test_pdf_ds():
     raw = _read("pdf_ds__pymupdf4llm.md")
     if raw is None:
         return
-
     cleaned = clean(raw, source="pdf")
     _save("pdf_ds__pymupdf4llm__clean.md", cleaned)
     _report("pdf_ds", raw, cleaned)
-
-    # N-01: picture omit 태그 제거
-    assert "==> picture" not in cleaned, \
-        "N-01: picture omit 태그 잔존"
-
-    # N-02: picture text 블록 제거
-    assert "Start of picture text" not in cleaned, \
-        "N-02: picture text 블록 잔존"
-
-
-    # N-11: 빈 bullet 제거
+    assert "==> picture" not in cleaned, "N-01: picture omit 태그 잔존"
+    assert "Start of picture text" not in cleaned, "N-02: picture text 블록 잔존"
     empty_bullets = re.findall(r"(?m)^[\s▪•\-–—]+\s*$", cleaned)
-    assert not empty_bullets, \
-        f"N-11: 빈 bullet {len(empty_bullets)}개 잔존"
-
-    # N-12: 3연속 빈 줄 없음
-    assert "\n\n\n" not in cleaned, \
-        "N-12: 과잉 공백 잔존"
-
+    assert not empty_bullets, f"N-11: 빈 bullet {len(empty_bullets)}개 잔존"
+    assert "\n\n\n" not in cleaned, "N-12: 과잉 공백 잔존"
     print("  ✅ pdf_ds 통과")
 
 
-# ─────────────────────────────────────────────────────────────
-# ② pdf_hanwha — 한화투자증권 두산밥캣 리포트
-# ─────────────────────────────────────────────────────────────
 def test_pdf_hanwha():
     raw = _read("pdf_hanwha__pymupdf4llm.md")
     if raw is None:
         return
-
     cleaned = clean(raw, source="pdf")
     _save("pdf_hanwha__pymupdf4llm__clean.md", cleaned)
     _report("pdf_hanwha", raw, cleaned)
-
-    # N-01: picture omit 태그 제거
-    assert "==> picture" not in cleaned, \
-        "N-01: picture omit 태그 잔존"
-
-    # N-06: 페이지 번호 단독 라인 제거
+    assert "==> picture" not in cleaned, "N-01: picture omit 태그 잔존"
     page_numbers = re.findall(r"(?m)^\s*\d{1,3}\s*$", cleaned)
-    assert not page_numbers, \
-        f"N-06: 페이지 번호 라인 {len(page_numbers)}개 잔존"
-
-    # N-07: 반복 헤더 제거
-    assert cleaned.count("두산밥캣 (241560)") <= 1, \
-        "N-07: 반복 헤더 '두산밥캣 (241560)' 잔존"
-    assert cleaned.count("[한화리서치]") <= 1, \
-        "N-07: 반복 헤더 '[한화리서치]' 잔존"
-
-    # N-12: 3연속 빈 줄 없음
-    assert "\n\n\n" not in cleaned, \
-        "N-12: 과잉 공백 잔존"
-
+    assert not page_numbers, f"N-06: 페이지 번호 라인 {len(page_numbers)}개 잔존"
+    assert cleaned.count("두산밥캣 (241560)") <= 1, "N-07: 반복 헤더 '두산밥캣 (241560)' 잔존"
+    assert cleaned.count("[한화리서치]") <= 1, "N-07: 반복 헤더 '[한화리서치]' 잔존"
+    assert "\n\n\n" not in cleaned, "N-12: 과잉 공백 잔존"
     print("  ✅ pdf_hanwha 통과")
 
 
-# ─────────────────────────────────────────────────────────────
-# ③ pdf_miraeasset_4q — 미래에셋증권 4Q 실적보고서
-# ─────────────────────────────────────────────────────────────
 def test_pdf_miraeasset_4q():
     raw = _read("pdf_miraeasset_4q__pymupdf4llm.md")
     if raw is None:
         return
-
     cleaned = clean(raw, source="ir_report")
     _save("pdf_miraeasset_4q__pymupdf4llm__clean.md", cleaned)
     _report("pdf_miraeasset_4q", raw, cleaned)
-
-    # N-01: picture omit 태그 제거
-    assert "==> picture" not in cleaned, \
-        "N-01: picture omit 태그 잔존"
-
-    # N-02: picture text 블록 제거
-    assert "Start of picture text" not in cleaned, \
-        "N-02: picture text 블록 잔존"
-
-    # N-03: <br> 태그 제거
-    assert "<br>" not in cleaned, \
-        "N-03: <br> 태그 잔존"
-    assert "<br/>" not in cleaned, \
-        "N-03: <br/> 태그 잔존"
-
-    # N-03: 요약손익계산서 중복 제거 (1회만 등장해야 함)
-    assert cleaned.count("요약손익계산서") < 3, \
-        f"N-03: 요약손익계산서 {cleaned.count('요약손익계산서')}회 중복 잔존"
-
-    # N-04: 페이지 타이틀 반복 제거 (첫 1회 유지)
-    assert cleaned.count("2025년실적보고서") < 3, \
-        f"N-04: 페이지 타이틀 {cleaned.count('2025년실적보고서')}회 반복 잔존"
-
-    # N-12: 3연속 빈 줄 없음
-    assert "\n\n\n" not in cleaned, \
-        "N-12: 과잉 공백 잔존"
-
+    assert "==> picture" not in cleaned, "N-01: picture omit 태그 잔존"
+    assert "Start of picture text" not in cleaned, "N-02: picture text 블록 잔존"
+    assert "<br>" not in cleaned, "N-03: <br> 태그 잔존"
+    assert "<br/>" not in cleaned, "N-03: <br/> 태그 잔존"
+    assert cleaned.count("요약손익계산서") < 3, f"N-03: 요약손익계산서 {cleaned.count('요약손익계산서')}회 중복 잔존"
+    assert cleaned.count("2025년실적보고서") < 3, f"N-04: 페이지 타이틀 {cleaned.count('2025년실적보고서')}회 반복 잔존"
+    assert "\n\n\n" not in cleaned, "N-12: 과잉 공백 잔존"
     print("  ✅ pdf_miraeasset_4q 통과")
 
 
-# ─────────────────────────────────────────────────────────────
-# ④ hwp_nonghyup — 농협 사업보고서
-# ─────────────────────────────────────────────────────────────
 def test_hwp_nonghyup():
     raw = _read("hwp_nonghyup__pyhwp.md")
     if raw is None:
         return
-
     cleaned = clean(raw, source="hwp")
     _save("hwp_nonghyup__pyhwp__clean.md", cleaned)
     _report("hwp_nonghyup", raw, cleaned)
-
-    # N-05: CSS 스타일 블록 제거
-    assert ".Section-0" not in cleaned, \
-        "N-05: CSS 블록 '.Section-0' 잔존"
-    assert ".HeaderPageFooter" not in cleaned, \
-        "N-05: CSS 블록 '.HeaderPageFooter' 잔존"
-    assert "<style" not in cleaned, \
-        "N-05: <style> 태그 잔존"
-
-    # N-12: 3연속 빈 줄 없음
-    assert "\n\n\n" not in cleaned, \
-        "N-12: 과잉 공백 잔존"
-
-    # 본문이 정상적으로 남아있는지 확인
-    assert "사업보고서" in cleaned, \
-        "본문 손실: '사업보고서' 텍스트 없음"
-    assert "재무상태표" in cleaned, \
-        "본문 손실: '재무상태표' 텍스트 없음"
-
+    assert ".Section-0" not in cleaned, "N-05: CSS 블록 '.Section-0' 잔존"
+    assert ".HeaderPageFooter" not in cleaned, "N-05: CSS 블록 '.HeaderPageFooter' 잔존"
+    assert "<style" not in cleaned, "N-05: <style> 태그 잔존"
+    assert "\n\n\n" not in cleaned, "N-12: 과잉 공백 잔존"
+    assert "사업보고서" in cleaned, "본문 손실: '사업보고서' 텍스트 없음"
+    assert "재무상태표" in cleaned, "본문 손실: '재무상태표' 텍스트 없음"
     print("  ✅ hwp_nonghyup 통과")
 
 
-# ─────────────────────────────────────────────────────────────
-# ⑤ doc_fss — 금융감독원 보도자료
-# ─────────────────────────────────────────────────────────────
 def test_doc_fss():
     raw = _read("doc_fss__python-docx.md")
     if raw is None:
         return
-
     cleaned = clean(raw, source="docx")
     _save("doc_fss__python-docx__clean.md", cleaned)
     _report("doc_fss", raw, cleaned)
-
-    # N-08: 보도출처 안내문 제거
-    assert "본 자료를 인용하여 보도할 경우" not in cleaned, \
-        "N-08: 보도출처 안내문 잔존"
-
-    # N-12: 3연속 빈 줄 없음
-    assert "\n\n\n" not in cleaned, \
-        "N-12: 과잉 공백 잔존"
-
-    # 본문이 정상적으로 남아있는지 확인
-    assert "회사채" in cleaned, \
-        "본문 손실: '회사채' 텍스트 없음"
-
+    assert "본 자료를 인용하여 보도할 경우" not in cleaned, "N-08: 보도출처 안내문 잔존"
+    assert "\n\n\n" not in cleaned, "N-12: 과잉 공백 잔존"
+    assert "회사채" in cleaned, "본문 손실: '회사채' 텍스트 없음"
     print("  ✅ doc_fss 통과")
 
 
-# ─────────────────────────────────────────────────────────────
-# 전체 실행
-# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("📋 preprocessor.py 노이즈 제거 테스트")
