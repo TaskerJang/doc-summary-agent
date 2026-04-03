@@ -147,8 +147,17 @@ def run(path: Path, no_summary: bool = False) -> dict:
                 print(f"  · {bullet}")
     except Exception as e:
         logger.error("요약 실패: %s", e, exc_info=True)
-        result.update({"status": "error", "summary_error": str(e)})
+        result.update({
+            "status": "partial",  # error → partial (파싱/청킹은 성공)
+            "summary_error": str(e),
+            "summary": {  # 빈 폴백 결과 — UI에서 에러 표시용
+                "overall": "[요약 생성 실패]",
+                "sections": [],
+                "is_image_based": is_image_based,
+            }
+        })
         print(f"  요약 실패   ❌ {e}")
+        # return 없음 — elapsed 로깅 및 완료 메시지까지 정상 진행
 
     elapsed = (datetime.now() - started_at).total_seconds()
     logger.info("파이프라인 완료 — %.1fs", elapsed)
