@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 MODEL       = "gpt-5.2"
 TIMEOUT     = 30
 PROMPTS_DIR         = Path(__file__).parent / "prompts"
-SYSTEM_PROMPT_PATH  = PROMPTS_DIR / "system.md"
-OCR_WARNING_PATH    = PROMPTS_DIR / "ocr_warning.md"
-CHUNK_PROMPT_PATH   = PROMPTS_DIR / "chunk_summary.md"
-OVERALL_PROMPT_PATH = PROMPTS_DIR / "overall_summary.md"
+SYSTEM_PROMPT_PATH  = PROMPTS_DIR / "system_v1.md"
+OCR_WARNING_PATH    = PROMPTS_DIR / "ocr_warning_v1.md"
+CHUNK_PROMPT_PATH   = PROMPTS_DIR / "chunk_summary_v1.md"
+OVERALL_PROMPT_PATH = PROMPTS_DIR / "overall_summary_v1.md"
 
 # ── OpenAI 클라이언트 ──────────────────────────────────────
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
