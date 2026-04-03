@@ -13,3 +13,12 @@ tests/step1_parser/-/
 
 .ocr_cache/
 tests/step1_parser/picture/
+
+# Chainlit 업로드 임시 파일
+.files/
+
+# 로그
+pipeline.log
+
+# Jupyter
+*.ipynb
