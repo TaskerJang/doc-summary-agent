@@ -1,0 +1,56 @@
+[
+  {
+    "id": "hanwha_001",
+    "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
+    "source": "pdf",
+    "question": "두산밥캣의 목표주가는 얼마인가?",
+    "answer": "80,000원",
+    "type": "factual",
+    "section": "낮아진 딜러 재고, 높아진 밸류에이션 매력도"
+  },
+  {
+    "id": "hanwha_002",
+    "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
+    "source": "pdf",
+    "question": "두산밥캣의 1분기 영업이익은 얼마인가?",
+    "answer": "1,606억원",
+    "type": "numerical",
+    "section": "상저하고의 2026년을 기대"
+  },
+  {
+    "id": "hanwha_003",
+    "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
+    "source": "pdf",
+    "question": "북미 딜러 재고는 몇 개월 수준인가?",
+    "answer": "3.0~3.5개월",
+    "type": "numerical",
+    "section": "딜러 재고, 비워냈으니 채울 차례"
+  },
+  {
+    "id": "hanwha_004",
+    "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
+    "source": "pdf",
+    "question": "멕시코 공장의 원가 절감 효과는?",
+    "answer": "10% 이상",
+    "type": "factual",
+    "section": "수익성 회복에 기여할 멕시코 공장"
+  },
+  {
+    "id": "hanwha_005",
+    "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
+    "source": "pdf",
+    "question": "이 리포트의 투자 의견 근거를 요약하면?",
+    "answer": "북미 딜러 재고 감소, 판가 인상, 멕시코 공장 가동으로 수익성 회복 전망. 업종 내 가장 저평가된 밸류에이션.",
+    "type": "summary",
+    "section": "투자의견 Buy, 목표주가 80,000원 유지"
+  },
+  {
+    "id": "hanwha_006",
+    "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
+    "source": "pdf",
+    "question": "두산밥캣의 내년 배당 계획은?",
+    "answer": "N/A - 문서에 없는 내용",
+    "type": "negative",
+    "section": ""
+  }
+]
