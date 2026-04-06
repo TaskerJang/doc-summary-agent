@@ -31,7 +31,6 @@ def _call_api(prompt: str, response_format: dict) -> dict:
     response = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0,
         reasoning_effort="low",
         max_completion_tokens=500,
         response_format=response_format,
@@ -77,9 +76,9 @@ def judge_faithfulness(source: str, summary: str) -> dict:
         return {
             "faithfulness": "Error",
             "faithfulness_reason": str(e),
-            "completeness": 0,
+            "completeness": None,
             "completeness_reason": "",
-            "conciseness": 0,
+            "conciseness": None,
             "conciseness_reason": "",
         }
 
