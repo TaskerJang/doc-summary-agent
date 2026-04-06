@@ -8,32 +8,38 @@ eval/generate_leaderboard.py
 """
 import argparse
 import json
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
-EVAL_DIR   = Path(__file__).parent
-RESULT_DIR = EVAL_DIR / "results"
+EVAL_DIR    = Path(__file__).parent
+RESULT_DIR  = EVAL_DIR / "results"
 LEADER_PATH = EVAL_DIR / "leaderboard.md"
 
 
-def load_latest_result() -> list[dict]:
+def load_latest_result() -> tuple[list[dict], str]:
     jsons = sorted(RESULT_DIR.glob("eval_results_*.json"), reverse=True)
     if not jsons:
         raise FileNotFoundError("평가 결과 파일 없음. 먼저 run_eval.py를 실행하세요.")
-    return json.loads(jsons[0].read_text(encoding="utf-8")), jsons[0].name
+    path = jsons[0]
+    return json.loads(path.read_text(encoding="utf-8")), path.name
 
 
 def avg(values: list) -> str:
-    if not values:
+    valid = [v for v in values if v is not None]
+    if not valid:
         return "-"
-    return f"{sum(values)/len(values):.4f}"
+    return f"{sum(valid) / len(valid):.4f}"
 
 
 def faithful_rate(results: list[dict]) -> str:
     if not results:
         return "-"
     n = sum(1 for r in results if r["faithfulness"] == "Faithful")
-    return f"{n}/{len(results)} ({n/len(results)*100:.1f}%)"
+    return f"{n}/{len(results)} ({n / len(results) * 100:.1f}%)"
+
+
+def _cs_label(cs) -> str:
+    return str(cs) if cs is not None else "기본값"
 
 
 def generate_leaderboard(results: list[dict], source_file: str) -> str:
@@ -42,7 +48,7 @@ def generate_leaderboard(results: list[dict], source_file: str) -> str:
 
     lines = [
         "# 📊 평가 리더보드",
-        f"",
+        "",
         f"> 자동 생성: {now}  |  소스: `{source_file}`  |  총 QA: {total}개",
         "",
         "---",
@@ -57,41 +63,77 @@ def generate_leaderboard(results: list[dict], source_file: str) -> str:
         f"| ROUGE-L | {avg([r['rougeL'] for r in results])} |",
         f"| 수치 정확도 | {avg([r['num_accuracy'] for r in results])} |",
         f"| Faithfulness | {faithful_rate(results)} |",
-        f"| Completeness (avg) | {avg([r['completeness'] for r in results if r['completeness']])} / 5 |",
-        f"| Conciseness (avg) | {avg([r['conciseness'] for r in results if r['conciseness']])} / 5 |",
+        f"| Completeness (avg) | {avg([r['completeness'] for r in results])} / 5 |",
+        f"| Conciseness (avg) | {avg([r['conciseness'] for r in results])} / 5 |",
         "",
         "---",
         "",
-        "## 2. OCR vs 텍스트 PDF 비교",
+        "## 2. 이미지 기반 vs 텍스트 기반 비교",
         "",
-        "| 문서 | 포맷 | Faithfulness | Numerical Acc | ROUGE-L |",
+        "| 포맷 | QA수 | ROUGE-L | Faithfulness | Num Acc |",
         "|---|---|---|---|---|",
     ]
 
-    # OCR vs 텍스트 — doc명에 'OCR' 또는 이미지 기반 여부로 분류
-    ocr_docs  = [r for r in results if '1Q' in r['doc'] or '2Q' in r['doc'] or '3Q' in r['doc']]
-    text_docs = [r for r in results if '4Q' in r['doc']]
-    if ocr_docs:
-        lines.append(f"| 미래에셋 1Q~3Q | OCR | {faithful_rate(ocr_docs)} | {avg([r['num_accuracy'] for r in ocr_docs])} | {avg([r['rougeL'] for r in ocr_docs])} |")
-    if text_docs:
-        lines.append(f"| 미래에셋 4Q | 텍스트 | {faithful_rate(text_docs)} | {avg([r['num_accuracy'] for r in text_docs])} | {avg([r['rougeL'] for r in text_docs])} |")
+    image_based  = [r for r in results if r.get("is_image_based")]
+    text_based   = [r for r in results if not r.get("is_image_based")]
+    if image_based:
+        lines.append(f"| 이미지 기반 (OCR) | {len(image_based)} | {avg([r['rougeL'] for r in image_based])} | {faithful_rate(image_based)} | {avg([r['num_accuracy'] for r in image_based])} |")
+    if text_based:
+        lines.append(f"| 텍스트 기반 | {len(text_based)} | {avg([r['rougeL'] for r in text_based])} | {faithful_rate(text_based)} | {avg([r['num_accuracy'] for r in text_based])} |")
 
     lines += [
         "",
         "---",
         "",
-        "## 3. chunk_size 민감도",
+        "## 3. 하이퍼파라미터 민감도",
         "",
-        "| chunk_size | Faithfulness | Completeness | ROUGE-L |",
-        "|---|---|---|---|",
+        "### chunk_size",
+        "",
+        "| chunk_size | QA수 | Faithfulness | Completeness | ROUGE-L |",
+        "|---|---|---|---|---|",
     ]
 
-    chunk_sizes = sorted(set(r['chunk_size'] for r in results if r['chunk_size']))
+    chunk_sizes = sorted(
+        set(r['chunk_size'] for r in results),
+        key=lambda x: (x is not None, x),
+    )
     for cs in chunk_sizes:
         subset = [r for r in results if r['chunk_size'] == cs]
-        lines.append(f"| {cs} | {faithful_rate(subset)} | {avg([r['completeness'] for r in subset])} | {avg([r['rougeL'] for r in subset])} |")
-    if not chunk_sizes:
-        lines.append("| 기본값 | - | - | - |")
+        lines.append(
+            f"| {_cs_label(cs)} | {len(subset)} | {faithful_rate(subset)} | {avg([r['completeness'] for r in subset])} | {avg([r['rougeL'] for r in subset])} |"
+        )
+
+    # chunk_overlap 비교 (결과에 키 있을 경우)
+    if any('chunk_overlap' in r for r in results):
+        lines += [
+            "",
+            "### chunk_overlap",
+            "",
+            "| chunk_overlap | QA수 | Faithfulness | Completeness | ROUGE-L |",
+            "|---|---|---|---|---|",
+        ]
+        overlaps = sorted(set(r.get('chunk_overlap') for r in results), key=lambda x: (x is None, x))
+        for co in overlaps:
+            subset = [r for r in results if r.get('chunk_overlap') == co]
+            lines.append(
+                f"| {_cs_label(co)} | {len(subset)} | {faithful_rate(subset)} | {avg([r['completeness'] for r in subset])} | {avg([r['rougeL'] for r in subset])} |"
+            )
+
+    # temperature 비교 (결과에 키 있을 경우)
+    if any('temperature' in r for r in results):
+        lines += [
+            "",
+            "### temperature",
+            "",
+            "| temperature | QA수 | Faithfulness | Completeness | ROUGE-L |",
+            "|---|---|---|---|---|",
+        ]
+        temps = sorted(set(r.get('temperature') for r in results), key=lambda x: (x is None, x))
+        for t in temps:
+            subset = [r for r in results if r.get('temperature') == t]
+            lines.append(
+                f"| {_cs_label(t)} | {len(subset)} | {faithful_rate(subset)} | {avg([r['completeness'] for r in subset])} | {avg([r['rougeL'] for r in subset])} |"
+            )
 
     lines += [
         "",
@@ -99,14 +141,16 @@ def generate_leaderboard(results: list[dict], source_file: str) -> str:
         "",
         "## 4. 질문 유형별 성능",
         "",
-        "| 유형 | Faithfulness | Numerical Acc | Completeness |",
-        "|---|---|---|---|",
+        "| 유형 | QA수 | Faithfulness | Num Acc | Completeness | ROUGE-L |",
+        "|---|---|---|---|---|---|",
     ]
 
     for t in ['factual', 'numerical', 'summary', 'negative', 'multi_doc']:
         subset = [r for r in results if r['type'] == t]
         if subset:
-            lines.append(f"| {t} | {faithful_rate(subset)} | {avg([r['num_accuracy'] for r in subset])} | {avg([r['completeness'] for r in subset])} |")
+            lines.append(
+                f"| {t} | {len(subset)} | {faithful_rate(subset)} | {avg([r['num_accuracy'] for r in subset])} | {avg([r['completeness'] for r in subset])} | {avg([r['rougeL'] for r in subset])} |"
+            )
 
     lines += [
         "",
@@ -118,10 +162,11 @@ def generate_leaderboard(results: list[dict], source_file: str) -> str:
         "|---|---|---|---|---|",
     ]
 
-    docs = sorted(set(r['doc'] for r in results))
-    for doc in docs:
+    for doc in sorted(set(r['doc'] for r in results)):
         subset = [r for r in results if r['doc'] == doc]
-        lines.append(f"| {doc} | {len(subset)} | {avg([r['rougeL'] for r in subset])} | {faithful_rate(subset)} | {avg([r['num_accuracy'] for r in subset])} |")
+        lines.append(
+            f"| {doc} | {len(subset)} | {avg([r['rougeL'] for r in subset])} | {faithful_rate(subset)} | {avg([r['num_accuracy'] for r in subset])} |"
+        )
 
     return "\n".join(lines) + "\n"
 
@@ -132,7 +177,7 @@ def main():
     args = parser.parse_args()
 
     if args.result:
-        path = Path(args.result)
+        path    = Path(args.result)
         results = json.loads(path.read_text(encoding="utf-8"))
         source  = path.name
     else:

@@ -13,7 +13,7 @@ import doc_parser
 from doc_parser.preprocessor import clean
 from doc_parser.metadata import extract
 from doc_parser.pdf import is_image_based_pdf
-from chunker.chunker import chunk
+from chunker.chunker import chunk, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
 from summarizer.llm import summarize, SummaryResult
 
 # ── 로깅 설정 ─────────────────────────────────────────────
@@ -96,26 +96,31 @@ def run_step1(path: Path) -> dict:
     return result
 
 
-def run_step2(step1_result: dict) -> dict:
+def run_step2(
+    step1_result: dict,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+) -> dict:
     """
     Step 2: 청킹
     Returns: step1_result + { chunks, chunk_count, chunk_error }
     """
     result = dict(step1_result)
     clean_text = result.get("clean_text", "")
-    logger.info("Step 2 시작 — 청킹")
+    logger.info("Step 2 시작 — 청킹 (chunk_size=%s, chunk_overlap=%s)", chunk_size, chunk_overlap)
 
     try:
-        chunks = chunk(clean_text)
+        chunks = chunk(clean_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         result["chunks"] = chunks
         result["chunk_count"] = len(chunks)
+        result["chunk_size"] = chunk_size
+        result["chunk_overlap"] = chunk_overlap
         logger.info("청킹 완료 — 총 %d개", len(chunks))
     except Exception as e:
         logger.error("청킹 실패: %s", e, exc_info=True)
         result.update({"status": "error", "chunk_error": str(e)})
 
     return result
-
 
 def run_step3(step2_result: dict) -> dict:
     """
