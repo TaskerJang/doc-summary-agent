@@ -5,6 +5,7 @@ eval/run_eval.py
 실행:
     uv run python eval/run_eval.py
     uv run python eval/run_eval.py --chunk-size 500 700 1000
+    uv run python eval/run_eval.py --chunk-overlap 50 100 200
     uv run python eval/run_eval.py --doc 한화투자증권_두산밥캣_기업분석_리포트.pdf
 """
 import argparse
@@ -49,60 +50,77 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
     )
 
 
-def run_pipeline(doc_path: Path, chunk_size: int | None = None) -> dict:
+def run_pipeline(
+    doc_path: Path,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+) -> dict:
     """단일 문서에 대해 파이프라인 실행 후 결과 반환."""
-    logger.info("파이프라인 실행: %s (chunk_size=%s)", doc_path.name, chunk_size)
+    logger.info("파이프라인 실행: %s (chunk_size=%s, chunk_overlap=%s)",
+                doc_path.name, chunk_size, chunk_overlap)
+
     step1 = run_step1(doc_path)
     if step1.get("status") == "error":
         return step1
-    step2 = run_step2(step1)
+
+    # None이면 chunker 기본값 사용
+    step2_kwargs = {}
+    if chunk_size is not None:
+        step2_kwargs["chunk_size"] = chunk_size
+    if chunk_overlap is not None:
+        step2_kwargs["chunk_overlap"] = chunk_overlap
+
+    step2 = run_step2(step1, **step2_kwargs)
     if step2.get("status") == "error":
         return step2
+
     step3 = run_step3(step2)
     return step3
 
 
 def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict) -> dict:
     """단일 QA 쌍에 대해 모든 지표를 계산한다."""
-    question   = qa["question"]
-    reference  = qa["answer"]
-    qa_type    = qa["type"]
+    question  = qa["question"]
+    reference = qa["answer"]
+    qa_type   = qa["type"]
 
     # Q&A 답변 생성
     qa_result  = ask(question, summary)
     prediction = qa_result.answer if qa_result.is_answerable else "[답변 불가]"
 
     # 자동 평가
-    rouge      = compute_rouge(prediction, reference)
-    num_acc    = compute_numerical_accuracy(prediction, reference)
+    rouge   = compute_rouge(prediction, reference)
+    num_acc = compute_numerical_accuracy(prediction, reference)
 
     result = {
-        "id":          qa["id"],
-        "doc":         qa["doc"],
-        "type":        qa_type,
-        "question":    question,
-        "reference":   reference,
-        "prediction":  prediction,
-        "rouge1":      rouge["rouge1"],
-        "rouge2":      rouge["rouge2"],
-        "rougeL":      rouge["rougeL"],
-        "num_accuracy": num_acc["accuracy"],
-        "num_matched":  num_acc["matched"],
-        "num_missed":   num_acc["missed"],
+        "id":             qa["id"],
+        "doc":            qa["doc"],
+        "type":           qa_type,
+        "question":       question,
+        "reference":      reference,
+        "prediction":     prediction,
+        "is_image_based": step3.get("is_image_based", False),
+        "rouge1":         rouge["rouge1"],
+        "rouge2":         rouge["rouge2"],
+        "rougeL":         rouge["rougeL"],
+        "num_accuracy":   num_acc["accuracy"],
+        "num_matched":    num_acc["matched"],
+        "num_missed":     num_acc["missed"],
     }
 
-    # LLM Judge (summary 유형 + negative 유형은 source 텍스트 필요)
-    source_text = step3.get("clean_text", "")[:3000]
+    # LLM Judge
+    # source_text 슬라이싱은 faithfulness_judge 내부에서 처리
+    source_text = step3.get("clean_text", "")
     judge = judge_faithfulness(source_text, prediction)
     result.update({
         "faithfulness":          judge.get("faithfulness", "Error"),
         "faithfulness_reason":   judge.get("faithfulness_reason", ""),
-        "completeness":          judge.get("completeness", 0),
-        "conciseness":           judge.get("conciseness", 0),
+        "completeness":          judge.get("completeness", None),
+        "conciseness":           judge.get("conciseness", None),
     })
 
     num_judge = judge_numerical_faithfulness(source_text, prediction)
-    result["numerical_faithfulness"] = num_judge.get("numerical_faithfulness", "Error")
+    result["numerical_faithfulness"]        = num_judge.get("numerical_faithfulness", "Error")
     result["numerical_faithfulness_reason"] = num_judge.get("reason", "")
 
     return result
@@ -112,11 +130,14 @@ def run_eval(
     qa_pairs: list[dict],
     docs_dir: Path,
     chunk_sizes: list[int] | None = None,
+    chunk_overlaps: list[int] | None = None,
     filter_doc: str | None = None,
 ) -> list[dict]:
     """전체 평가 파이프라인 실행."""
     if chunk_sizes is None:
-        chunk_sizes = [None]  # None = 기본값
+        chunk_sizes = [None]
+    if chunk_overlaps is None:
+        chunk_overlaps = [None]
 
     all_results = []
 
@@ -135,23 +156,26 @@ def run_eval(
             continue
 
         for chunk_size in chunk_sizes:
-            logger.info("=== 문서: %s | chunk_size: %s ===", doc_name, chunk_size)
-            step3 = run_pipeline(doc_path, chunk_size)
-            if step3.get("status") == "error":
-                logger.error("파이프라인 실패: %s", step3)
-                continue
+            for chunk_overlap in chunk_overlaps:
+                logger.info("=== 문서: %s | chunk_size: %s | chunk_overlap: %s ===",
+                            doc_name, chunk_size, chunk_overlap)
+                step3 = run_pipeline(doc_path, chunk_size, chunk_overlap)
+                if step3.get("status") == "error":
+                    logger.error("파이프라인 실패: %s", step3)
+                    continue
 
-            summary = _to_summary_result(step3)
-            if not summary:
-                logger.error("요약 결과 없음: %s", doc_name)
-                continue
+                summary = _to_summary_result(step3)
+                if not summary:
+                    logger.error("요약 결과 없음: %s", doc_name)
+                    continue
 
-            for qa in qas:
-                result = evaluate_qa(qa, summary, step3)
-                result["chunk_size"] = chunk_size
-                all_results.append(result)
-                logger.info("QA [%s] ROUGE-L=%.3f Faithfulness=%s",
-                            qa["id"], result["rougeL"], result["faithfulness"])
+                for qa in qas:
+                    result = evaluate_qa(qa, summary, step3)
+                    result["chunk_size"]    = chunk_size
+                    result["chunk_overlap"] = chunk_overlap
+                    all_results.append(result)
+                    logger.info("QA [%s] ROUGE-L=%.3f Faithfulness=%s",
+                                qa["id"], result["rougeL"], result["faithfulness"])
 
     return all_results
 
@@ -161,8 +185,11 @@ def save_results(results: list[dict], tag: str = "") -> Path:
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"eval_results_{tag}_{ts}.json" if tag else f"eval_results_{ts}.json"
     path = RESULT_DIR / name
-    path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("결과 저장: %s", path)
+    try:
+        path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("결과 저장: %s", path)
+    except Exception as e:
+        logger.error("결과 저장 실패: %s", e)
     return path
 
 
@@ -178,8 +205,11 @@ def print_summary(results: list[dict]) -> None:
     avg_rougeL  = sum(r["rougeL"]      for r in results) / total
     avg_num_acc = sum(r["num_accuracy"] for r in results) / total
     faithful    = sum(1 for r in results if r["faithfulness"] == "Faithful")
-    avg_comp    = sum(r["completeness"] for r in results) / total
-    avg_conc    = sum(r["conciseness"]  for r in results) / total
+
+    comp_vals = [r["completeness"] for r in results if r["completeness"] is not None]
+    conc_vals = [r["conciseness"]  for r in results if r["conciseness"]  is not None]
+    avg_comp  = sum(comp_vals) / len(comp_vals) if comp_vals else 0.0
+    avg_conc  = sum(conc_vals) / len(conc_vals) if conc_vals else 0.0
 
     print("\n" + "=" * 60)
     print(f"📊 평가 결과 요약  (총 {total}개 QA)")
@@ -193,22 +223,23 @@ def print_summary(results: list[dict]) -> None:
     print(f"  Conciseness 평균:  {avg_conc:.2f} / 5")
     print("=" * 60)
 
-    # 유형별 요약
     types = set(r["type"] for r in results)
     print("\n📋 질문 유형별 ROUGE-L")
     for t in sorted(types):
         subset = [r for r in results if r["type"] == t]
-        avg = sum(r["rougeL"] for r in subset) / len(subset)
+        avg    = sum(r["rougeL"] for r in subset) / len(subset)
         print(f"  {t:12s}: {avg:.4f}  (n={len(subset)})")
 
 
 def main():
     parser = argparse.ArgumentParser(description="평가 파이프라인 실행")
-    parser.add_argument("--chunk-size", nargs="+", type=int,
+    parser.add_argument("--chunk-size",    nargs="+", type=int,
                         help="청크 크기 목록 (예: 500 700 1000)")
-    parser.add_argument("--doc", type=str,
+    parser.add_argument("--chunk-overlap", nargs="+", type=int,
+                        help="청크 오버랩 목록 (예: 50 100 200)")
+    parser.add_argument("--doc",  type=str, default="",
                         help="특정 문서만 평가 (파일명)")
-    parser.add_argument("--tag", type=str, default="",
+    parser.add_argument("--tag",  type=str, default="",
                         help="결과 파일 태그")
     args = parser.parse_args()
 
@@ -219,7 +250,8 @@ def main():
         qa_pairs=qa_pairs,
         docs_dir=DOCS_DIR,
         chunk_sizes=args.chunk_size,
-        filter_doc=args.doc,
+        chunk_overlaps=args.chunk_overlap,
+        filter_doc=args.doc or None,
     )
 
     save_results(results, tag=args.tag)
