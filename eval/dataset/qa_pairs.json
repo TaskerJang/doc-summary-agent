@@ -6,14 +6,14 @@
     "question": "두산밥캣의 목표주가는 얼마인가?",
     "answer": "80,000원",
     "type": "factual",
-    "section": "낮아진 딜러 재고, 높아진 밸류에이션 매력도"
+    "section": "투자의견 Buy, 목표주가 80,000원 유지"
   },
   {
     "id": "hanwha_002",
     "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
     "source": "pdf",
-    "question": "두산밥캣의 1분기 영업이익은 얼마인가?",
-    "answer": "1,606억원",
+    "question": "두산밥캣의 2026년 1분기 예상 영업이익과 OPM은?",
+    "answer": "1,606억원(-19.7%, OPM 7.4%)",
     "type": "numerical",
     "section": "상저하고의 2026년을 기대"
   },
@@ -21,7 +21,7 @@
     "id": "hanwha_003",
     "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
     "source": "pdf",
-    "question": "북미 딜러 재고는 몇 개월 수준인가?",
+    "question": "북미 딜러 재고는 몇 개월 수준까지 내려왔는가?",
     "answer": "3.0~3.5개월",
     "type": "numerical",
     "section": "딜러 재고, 비워냈으니 채울 차례"
@@ -30,26 +30,332 @@
     "id": "hanwha_004",
     "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
     "source": "pdf",
-    "question": "멕시코 공장의 원가 절감 효과는?",
-    "answer": "10% 이상",
-    "type": "factual",
-    "section": "수익성 회복에 기여할 멕시코 공장"
-  },
-  {
-    "id": "hanwha_005",
-    "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
-    "source": "pdf",
     "question": "이 리포트의 투자 의견 근거를 요약하면?",
     "answer": "북미 딜러 재고 감소, 판가 인상, 멕시코 공장 가동으로 수익성 회복 전망. 업종 내 가장 저평가된 밸류에이션.",
     "type": "summary",
     "section": "투자의견 Buy, 목표주가 80,000원 유지"
   },
   {
+    "id": "hanwha_005",
+    "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
+    "source": "pdf",
+    "question": "멕시코 공장 생산분의 원가 절감 효과와 올해 예상 생산 대수는?",
+    "answer": "원가 절감 10% 이상, 올해 약 6,000대 생산 예상",
+    "type": "factual",
+    "section": "수익성 회복에 기여할 멕시코 공장"
+  },
+  {
     "id": "hanwha_006",
     "doc": "한화투자증권_두산밥캣_기업분석_리포트.pdf",
     "source": "pdf",
-    "question": "두산밥캣의 내년 배당 계획은?",
+    "question": "두산밥캣의 2026년 예상 배당수익률은?",
+    "answer": "N/A - 문서에 없는 내용 (재무정보표에 2026E 배당수익률 3.5%가 있으나 이는 예측치이며 배당 계획 공시 내용은 없음)",
+    "type": "negative",
+    "section": ""
+  },
+  {
+    "id": "ds_001",
+    "doc": "DS투자증권_시황분석_리포트.pdf",
+    "source": "pdf",
+    "question": "이 리포트의 발행일과 담당 연구원은?",
+    "answer": "2026년 3월 16일, 김현지 연구원(02-709-2663)",
+    "type": "factual",
+    "section": "지수 종합"
+  },
+  {
+    "id": "ds_002",
+    "doc": "DS투자증권_시황분석_리포트.pdf",
+    "source": "pdf",
+    "question": "지난 금요일 코스피와 코스닥 등락률은?",
+    "answer": "코스피 1.7% 하락, 코스닥 0.4% 상승",
+    "type": "factual",
+    "section": "지수 종합"
+  },
+  {
+    "id": "ds_003",
+    "doc": "DS투자증권_시황분석_리포트.pdf",
+    "source": "pdf",
+    "question": "원전 업종 강세 배경과 주요 수혜 종목을 요약하면?",
+    "answer": "유가 90~100달러/bbl 레벨에서 유럽 원전 제로 유지 어려움, 유럽 신규 수주 기대감 반영. 대우건설(+17.8%), 한전기술(+6.4%), 현대건설(+5.6%) 등 강세.",
+    "type": "summary",
+    "section": "업종 이슈"
+  },
+  {
+    "id": "ds_004",
+    "doc": "DS투자증권_시황분석_리포트.pdf",
+    "source": "pdf",
+    "question": "외국인의 3월 8거래일 누적 순매도 금액은?",
+    "answer": "13.2조원",
+    "type": "factual",
+    "section": "지수 종합"
+  },
+  {
+    "id": "ds_005",
+    "doc": "DS투자증권_시황분석_리포트.pdf",
+    "source": "pdf",
+    "question": "이 보고서에서 언급된 한국은행 금통위 일정은?",
+    "answer": "N/A - 문서에 없는 내용 (BOJ·BOE·ECB 통화정책회의는 언급되나 한국은행 일정은 없음)",
+    "type": "negative",
+    "section": ""
+  },
+  {
+    "id": "mirae_1q_001",
+    "doc": "미래에셋증권_1분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "미래에셋증권 2025년 1분기 연결 세전이익은?",
+    "answer": "3,461억원",
+    "type": "numerical",
+    "section": "1Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_1q_002",
+    "doc": "미래에셋증권_1분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "1분기 별도 고객자산 총액은?",
+    "answer": "405조원(연금 44.4조원, 해외주식 34.5조원)",
+    "type": "numerical",
+    "section": "1Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_1q_003",
+    "doc": "미래에셋증권_1분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "1분기 해외주식 수수료 수익과 전체 브로커리지 수수료 수익은?",
+    "answer": "해외주식 1,012억원, 전체 브로커리지 1,987억원",
+    "type": "numerical",
+    "section": "사업별 주요 실적 - Brokerage"
+  },
+  {
+    "id": "mirae_1q_004",
+    "doc": "미래에셋증권_1분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "1분기 연결 누적연환산 ROE와 전분기 대비 변동폭은?",
+    "answer": "8.5%, QoQ +0.6%p",
+    "type": "numerical",
+    "section": "1Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_2q_001",
+    "doc": "미래에셋증권_2분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "2025년 2분기 연결 세전이익과 순이익은?",
+    "answer": "세전이익 5,202억원, 순이익 4,059억원",
+    "type": "numerical",
+    "section": "2Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_2q_002",
+    "doc": "미래에셋증권_2분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "2분기 별도 Trading 손익과 전분기 대비 증감률은?",
+    "answer": "4,762억원(QoQ +46%)",
+    "type": "numerical",
+    "section": "사업별 주요 실적 - Trading"
+  },
+  {
+    "id": "mirae_2q_003",
+    "doc": "미래에셋증권_2분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "2분기 총 고객자산 규모와 연금자산 규모는?",
+    "answer": "총 고객자산 453조원, 연금자산 47.3조원",
+    "type": "numerical",
+    "section": "2Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_2q_004",
+    "doc": "미래에셋증권_2분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "2분기 연결 누적연환산 ROE는?",
+    "answer": "10.9%",
+    "type": "numerical",
+    "section": "2Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_3q_001",
+    "doc": "미래에셋증권_3분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "2025년 3분기 연결 세전이익과 순이익은?",
+    "answer": "세전이익 4,472억원, 순이익 3,438억원",
+    "type": "numerical",
+    "section": "3Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_3q_002",
+    "doc": "미래에셋증권_3분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "3분기 브로커리지 수수료 수익과 WM 수수료 수익은?",
+    "answer": "브로커리지 2,637억원(분기 최대), WM 918억원(분기 최대)",
+    "type": "numerical",
+    "section": "3Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_3q_003",
+    "doc": "미래에셋증권_3분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "3분기 해외주식 잔고와 전분기 대비 증감률은?",
+    "answer": "49.6조원(전분기 대비 25% 증가, 업계 최대)",
+    "type": "numerical",
+    "section": "사업별 주요 실적 - Brokerage"
+  },
+  {
+    "id": "mirae_3q_004",
+    "doc": "미래에셋증권_3분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "3분기 연결 누적연환산 ROE는?",
+    "answer": "10.8%",
+    "type": "numerical",
+    "section": "3Q 2025 Key Highlights"
+  },
+  {
+    "id": "mirae_4q_001",
+    "doc": "미래에셋증권_4분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "미래에셋증권 2025년 연간 연결 세전이익과 순이익은?",
+    "answer": "세전이익 2조 794억원, 순이익 1조 5,829억원",
+    "type": "numerical",
+    "section": "2025 Key Highlights"
+  },
+  {
+    "id": "mirae_4q_002",
+    "doc": "미래에셋증권_4분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "2025년 연간 연결 ROE와 전년 대비 변동폭은?",
+    "answer": "12.4%(YoY +4.5%p)",
+    "type": "numerical",
+    "section": "2025 Key Highlights"
+  },
+  {
+    "id": "mirae_4q_003",
+    "doc": "미래에셋증권_4분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "2025년 해외법인 세전이익과 선진국·이머징 비중은?",
+    "answer": "4,981억원(YoY +200%), 선진국 3,315억원(67%), 이머징 1,666억원(33%)",
+    "type": "numerical",
+    "section": "사업별 주요 실적 - 해외법인"
+  },
+  {
+    "id": "mirae_4q_004",
+    "doc": "미래에셋증권_4분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "2025년 연간 실적을 종합하여 핵심 성과를 요약하면?",
+    "answer": "연결 ROE 12.4% 달성(기업가치제고 목표 ROE 10%+ 초과), 브로커리지(1조 110억원)·WM(3,421억원)·해외법인(4,981억원) 모두 사상 최대, PI 공정가치평가 4분기 연속 흑자(연누적 약 6,020억원), 총 고객자산 602조원 달성.",
+    "type": "summary",
+    "section": "2025 Key Highlights"
+  },
+  {
+    "id": "mirae_4q_005",
+    "doc": "미래에셋증권_4분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "미래에셋증권의 분기별 ROE 추이를 보면 1Q~4Q 중 가장 높은 분기는 어느 분기이며, 해당 분기 WM 수수료 수익은 얼마인가?",
+    "answer": "2Q25가 ROE 10.9%로 가장 높으며, 해당 분기 WM 수수료 수익은 75.7억원(별도 기준 757억원)",
+    "type": "multi_doc",
+    "section": "2025 Key Highlights / 사업별 주요 실적 - WM"
+  },
+  {
+    "id": "mirae_4q_006",
+    "doc": "미래에셋증권_4분기_실적보고서.pdf",
+    "source": "pdf",
+    "question": "미래에셋증권의 2025년 4분기 배당 지급일은?",
     "answer": "N/A - 문서에 없는 내용",
+    "type": "negative",
+    "section": ""
+  },
+  {
+    "id": "nonghyup_001",
+    "doc": "농협_2022년_9월말_기준_사업보고서.hwp",
+    "source": "hwp",
+    "question": "이 사업보고서의 보고 기관명과 조합장은?",
+    "answer": "청산농업협동조합, 조합장 차동악",
+    "type": "factual",
+    "section": "표지"
+  },
+  {
+    "id": "nonghyup_002",
+    "doc": "농협_2022년_9월말_기준_사업보고서.hwp",
+    "source": "hwp",
+    "question": "2022년 9월말 기준 판매사업 실적 합계와 주요 항목은?",
+    "answer": "6,964백만원(채소류 3,725백만원, 기타 수산물 등 3,102백만원, 마트사업 1,990백만원)",
+    "type": "factual",
+    "section": "주요사업 추진 현황"
+  },
+  {
+    "id": "nonghyup_003",
+    "doc": "농협_2022년_9월말_기준_사업보고서.hwp",
+    "source": "hwp",
+    "question": "2022년 구매사업 중 유류 매입 금액과 구매사업 합계는?",
+    "answer": "유류 771백만원, 구매사업 합계 1,261백만원",
+    "type": "factual",
+    "section": "주요사업 추진 현황"
+  },
+  {
+    "id": "nonghyup_004",
+    "doc": "농협_2022년_9월말_기준_사업보고서.hwp",
+    "source": "hwp",
+    "question": "이 보고서에서 다루는 기간과 사업 구조를 요약하면?",
+    "answer": "2022년 1월 1일부터 9월 30일까지. 교육지원사업, 경제(유통)사업(판매·구매·마트), 신용(금융)사업, 기타사업으로 구성. 전남 완도군 청산면 소재 지역농협.",
+    "type": "summary",
+    "section": "목차 / 주요사업 추진 현황"
+  },
+  {
+    "id": "nonghyup_005",
+    "doc": "농협_2022년_9월말_기준_사업보고서.hwp",
+    "source": "hwp",
+    "question": "이 보고서에 기재된 청산농협의 당기순이익은 얼마인가?",
+    "answer": "N/A - 문서에서 확인 불가 (재무상태표·손익계산서 목차는 있으나 HWP 표 구조상 수치 추출 불가)",
+    "type": "negative",
+    "section": ""
+  },
+  {
+    "id": "fss_001",
+    "doc": "금융감독원_251125__보도자료__25_10월중_기업의_직접금융_조달실적.docx",
+    "source": "doc",
+    "question": "2025년 10월 중 주식·회사채 공모발행액 합계는?",
+    "answer": "23조 7,050억원(주식 939억원, 회사채 23조 6,111억원)",
+    "type": "numerical",
+    "section": "개황"
+  },
+  {
+    "id": "fss_002",
+    "doc": "금융감독원_251125__보도자료__25_10월중_기업의_직접금융_조달실적.docx",
+    "source": "doc",
+    "question": "2025년 10월 CP 및 단기사채 발행액 합계와 전월 대비 증감은?",
+    "answer": "137조 6,459억원, 전월 대비 12조 3,867억원 감소(8.3%↓)",
+    "type": "numerical",
+    "section": "개황"
+  },
+  {
+    "id": "fss_003",
+    "doc": "금융감독원_251125__보도자료__25_10월중_기업의_직접금융_조달실적.docx",
+    "source": "doc",
+    "question": "10월 일반회사채의 신용등급별 발행 비중에서 AA등급 이상과 BBB등급 이하 비중은?",
+    "answer": "AA등급 이상 73.0%(전월 66.5%), BBB등급 이하 0.0%(전월 7.6%)",
+    "type": "numerical",
+    "section": "주식·회사채 발행 실적"
+  },
+  {
+    "id": "fss_004",
+    "doc": "금융감독원_251125__보도자료__25_10월중_기업의_직접금융_조달실적.docx",
+    "source": "doc",
+    "question": "10월말 기준 전체 회사채 잔액과 전월 대비 증감은?",
+    "answer": "750조 447억원, 전월 대비 8조 1,570억원 증가(1.1%↑)",
+    "type": "numerical",
+    "section": "주식·회사채 발행 실적"
+  },
+  {
+    "id": "fss_005",
+    "doc": "금융감독원_251125__보도자료__25_10월중_기업의_직접금융_조달실적.docx",
+    "source": "doc",
+    "question": "10월 주식 발행 현황을 요약하면?",
+    "answer": "총 4건 939억원. IPO 2건 524억원(코스닥), 유상증자 2건 415억원(코스닥 소규모). 전월(8건, 3,698억원) 대비 74.6% 감소.",
+    "type": "factual",
+    "section": "주식·회사채 발행 실적"
+  },
+  {
+    "id": "fss_006",
+    "doc": "금융감독원_251125__보도자료__25_10월중_기업의_직접금융_조달실적.docx",
+    "source": "doc",
+    "question": "이 보도자료에서 언급된 회사채 발행 기업의 개별 회사명은?",
+    "answer": "N/A - 문서에 없는 내용 (집계 통계만 수록, 개별 발행사 명칭은 기재되지 않음)",
     "type": "negative",
     "section": ""
   }
