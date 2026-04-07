@@ -50,6 +50,12 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
     )
 
 
+def _extract_raw_chunks(step3: dict) -> list[str]:
+    """step3 결과에서 원문 청크 텍스트 목록 추출."""
+    chunks = step3.get("chunks", [])
+    return [c["text"] for c in chunks if c.get("text", "").strip()]
+
+
 def run_pipeline(
     doc_path: Path,
     chunk_size: int | None = None,
@@ -63,7 +69,6 @@ def run_pipeline(
     if step1.get("status") == "error":
         return step1
 
-    # None이면 chunker 기본값 사용
     step2_kwargs = {}
     if chunk_size is not None:
         step2_kwargs["chunk_size"] = chunk_size
@@ -84,8 +89,11 @@ def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict) -> dict:
     reference = qa["answer"]
     qa_type   = qa["type"]
 
-    # Q&A 답변 생성
-    qa_result  = ask(question, summary)
+    # 원문 청크 추출 — Completeness 개선을 위해 ask()에 전달
+    raw_chunks = _extract_raw_chunks(step3)
+
+    # Q&A 답변 생성 (원문 청크 포함)
+    qa_result  = ask(question, summary, raw_chunks=raw_chunks)
     prediction = qa_result.answer if qa_result.is_answerable else "[답변 불가]"
 
     # 자동 평가
@@ -109,7 +117,6 @@ def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict) -> dict:
     }
 
     # LLM Judge
-    # source_text 슬라이싱은 faithfulness_judge 내부에서 처리
     source_text = step3.get("clean_text", "")
     judge = judge_faithfulness(source_text, prediction)
     result.update({
@@ -141,7 +148,6 @@ def run_eval(
 
     all_results = []
 
-    # 문서별로 그룹핑
     docs = {}
     for qa in qa_pairs:
         doc = qa["doc"]
