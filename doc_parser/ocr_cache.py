@@ -16,7 +16,6 @@ def _get_ocr():
     PaddleOCR v3 (PP-OCRv5) 인스턴스 반환
     - lang='korean': 한국어 + 영어 혼용 문서 지원
     - use_angle_cls=True: 회전된 텍스트 보정
-    - show_log=False: 로그 억제
     최초 호출 시 모델 다운로드 후 캐시
     """
     global _ocr
@@ -25,7 +24,6 @@ def _get_ocr():
         _ocr = PaddleOCR(
             lang='korean',
             use_angle_cls=True,
-            show_log=False,
         )
     return _ocr
 
