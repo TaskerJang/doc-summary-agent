@@ -120,4 +120,3 @@ uv run python eval/generate_leaderboard.py --result eval/results/eval_results_*.
 | `docs:` | 문서 |
 | `refactor:` | 리팩토링 |
 | `test:` | 테스트 |
-```
