@@ -2,6 +2,8 @@ import json
 import logging
 from pathlib import Path
 
+from rank_bm25 import BM25Okapi
+
 from summarizer.llm import SummaryResult, _call_api
 
 logger = logging.getLogger(__name__)
@@ -14,12 +16,21 @@ FOLLOW_UP_PROMPT_PATH = PROMPTS_DIR / "follow_up_v1.md"
 MAX_SUMMARY_SECTIONS = 3
 MAX_RAW_CHUNKS       = 3
 
+# BM25 최소 스코어 임계값 — 이 이하면 관련 없는 청크로 판단해 제외
+BM25_MIN_SCORE = 0.1
+
 
 class QAResult:
     def __init__(self, answer: str, sources: list[str], is_answerable: bool):
         self.answer        = answer
         self.sources       = sources
         self.is_answerable = is_answerable
+
+
+def _tokenize(text: str) -> list[str]:
+    """간단한 공백/구두점 기반 토크나이저 (한국어 포함)."""
+    import re
+    return re.findall(r"[가-힣a-zA-Z0-9]+", text)
 
 
 def _find_relevant_sections(question: str, summary: SummaryResult) -> list:
@@ -34,24 +45,43 @@ def _find_relevant_sections(question: str, summary: SummaryResult) -> list:
     return [sec for _, sec in scored[:MAX_SUMMARY_SECTIONS]]
 
 
-def _find_relevant_chunks(question: str, raw_chunks: list[str]) -> list[str]:
+def _find_relevant_chunks_bm25(question: str, raw_chunks: list[str]) -> list[str]:
     """
-    원문 청크 중 질문 키워드와 겹치는 상위 MAX_RAW_CHUNKS개 반환.
-    키워드 매칭 점수 0이면 전체에서 첫 MAX_RAW_CHUNKS개 fallback.
+    BM25Okapi로 질문과 관련성 높은 원문 청크 상위 MAX_RAW_CHUNKS개 반환.
+    BM25_MIN_SCORE 미만인 청크는 노이즈로 판단해 제외.
+    점수가 모두 0이면 빈 리스트 반환 (fallback 없음 — hallucination 방지).
     """
     if not raw_chunks:
         return []
-    keywords = set(question.replace("?", "").replace(".", "").split())
-    scored = [(sum(1 for kw in keywords if kw in chunk), chunk) for chunk in raw_chunks]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top = [chunk for score, chunk in scored[:MAX_RAW_CHUNKS] if score > 0]
-    return top if top else raw_chunks[:MAX_RAW_CHUNKS]
+
+    tokenized_chunks = [_tokenize(c) for c in raw_chunks]
+    tokenized_query  = _tokenize(question)
+
+    # 토큰이 하나도 없는 청크가 있으면 BM25가 오작동하므로 필터링
+    valid = [(chunk, tok) for chunk, tok in zip(raw_chunks, tokenized_chunks) if tok]
+    if not valid:
+        return []
+
+    chunks_valid, tokenized_valid = zip(*valid)
+    bm25   = BM25Okapi(list(tokenized_valid))
+    scores = bm25.get_scores(tokenized_query)
+
+    # 스코어 기준 내림차순 정렬 후 임계값 이상만 선택
+    ranked = sorted(zip(scores, chunks_valid), key=lambda x: x[0], reverse=True)
+    result = [chunk for score, chunk in ranked[:MAX_RAW_CHUNKS] if score >= BM25_MIN_SCORE]
+
+    if result:
+        logger.debug("BM25 선택 청크 %d개 (top score=%.3f)", len(result), ranked[0][0])
+    else:
+        logger.debug("BM25 임계값 미달 — 원문 청크 미사용 (top score=%.3f)", ranked[0][0] if ranked else 0)
+
+    return result
 
 
 def _build_context(relevant_sections: list, relevant_chunks: list[str]) -> str:
     """
-    [요약 섹션] + [원문 청크] 를 합쳐 context 문자열 구성.
-    원문 청크를 앞에 배치해 LLM이 원문을 우선 참조하도록 유도.
+    [원문 발췌] + [요약 섹션] 순서로 context 구성.
+    원문을 앞에 배치해 LLM이 요약보다 원문을 우선 참조하도록 유도.
     """
     parts = []
 
@@ -78,15 +108,15 @@ def ask(
     질문에 대한 답변 생성.
 
     Args:
-        question: 질문 문자열
-        summary:  LLM 요약 결과 (SummaryResult)
-        raw_chunks: 원문 청크 텍스트 리스트 (Completeness 개선용)
+        question:   질문 문자열
+        summary:    LLM 요약 결과 (SummaryResult)
+        raw_chunks: 원문 청크 텍스트 리스트 (BM25 검색용)
                     None이면 요약 섹션만 context로 사용 (기존 동작 유지)
     """
     logger.info("Q&A 시작 — 질문: %r", question[:50])
 
     relevant_sections = _find_relevant_sections(question, summary)
-    relevant_chunks   = _find_relevant_chunks(question, raw_chunks or [])
+    relevant_chunks   = _find_relevant_chunks_bm25(question, raw_chunks or [])
 
     if not relevant_sections and not relevant_chunks:
         logger.warning("관련 섹션/청크 없음 — 답변 불가")
@@ -115,7 +145,7 @@ def ask(
             ],
             max_tokens=500,
         )
-        logger.info("Q&A 완료 — 출처 섹션 %d개", len(sources))
+        logger.info("Q&A 완료 — 출처 섹션 %d개, 원문 청크 %d개", len(sources), len(relevant_chunks))
         return QAResult(answer=raw, sources=sources, is_answerable=True)
 
     except Exception as e:
@@ -128,9 +158,7 @@ def ask(
 
 
 def generate_follow_ups(summary: SummaryResult) -> list[str]:
-    """
-    전체 요약을 바탕으로 자연스러운 추천 질문 3개를 생성한다.
-    """
+    """전체 요약을 바탕으로 추천 질문 3개를 생성한다."""
     defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
 
     if not summary.overall or summary.overall.startswith("["):
