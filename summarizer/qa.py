@@ -20,8 +20,15 @@ MAX_RAW_CHUNKS       = 3
 BM25_MIN_SCORE = 0.1
 
 
+class SourceItem:
+    """출처 섹션명 + 핵심 내용 한 줄."""
+    def __init__(self, section: str, snippet: str):
+        self.section = section
+        self.snippet = snippet
+
+
 class QAResult:
-    def __init__(self, answer: str, sources: list[str], is_answerable: bool):
+    def __init__(self, answer: str, sources: list[SourceItem], is_answerable: bool):
         self.answer        = answer
         self.sources       = sources
         self.is_answerable = is_answerable
@@ -99,6 +106,15 @@ def _build_context(relevant_sections: list, relevant_chunks: list[str]) -> str:
     return "\n\n".join(parts)
 
 
+def _make_sources(relevant_sections: list) -> list[SourceItem]:
+    """섹션명 + 첫 번째 bullet을 출처 아이템으로 변환."""
+    result = []
+    for sec in relevant_sections:
+        snippet = sec.bullets[0] if sec.bullets else ""
+        result.append(SourceItem(section=sec.section, snippet=snippet))
+    return result
+
+
 def ask(
     question: str,
     summary: SummaryResult,
@@ -127,7 +143,7 @@ def ask(
         )
 
     context = _build_context(relevant_sections, relevant_chunks)
-    sources = [sec.section for sec in relevant_sections]
+    sources = _make_sources(relevant_sections)
 
     template    = QA_PROMPT_PATH.read_text(encoding="utf-8")
     user_prompt = template.format(question=question, context=context)
