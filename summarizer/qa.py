@@ -16,7 +16,7 @@ FOLLOW_UP_PROMPT_PATH = PROMPTS_DIR / "follow_up_v1.md"
 MAX_SUMMARY_SECTIONS = 3
 MAX_RAW_CHUNKS       = 3
 
-# BM25 최소 스코어 임계값 — 이 이하면 관련 없는 청크로 판단해 제외
+# BM25 최소 스코어 임계값
 BM25_MIN_SCORE = 0.1
 
 # 출처 snippet 최대 길이
@@ -43,23 +43,57 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"[가-힣a-zA-Z0-9]+", text)
 
 
-def _find_relevant_sections(question: str, summary: SummaryResult) -> list:
-    keywords = set(question.replace("?", "").replace(".", "").split())
-    scored = []
-    for sec in summary.sections:
-        text  = sec.section + " " + " ".join(sec.bullets)
-        score = sum(1 for kw in keywords if kw in text)
-        if score > 0:
-            scored.append((score, sec))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [sec for _, sec in scored[:MAX_SUMMARY_SECTIONS]]
+def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
+    """
+    BM25Okapi로 요약 섹션 중 질문과 관련성 높은 상위 MAX_SUMMARY_SECTIONS개 반환.
+    각 섹션의 검색 대상 텍스트 = 섹션명 + 모든 bullet 합산.
+    BM25_MIN_SCORE 미만이면 노이즈로 판단해 제외.
+    """
+    if not summary.sections:
+        return []
+
+    # 섹션별 검색 텍스트 구성
+    section_texts = [
+        sec.section + " " + " ".join(sec.bullets)
+        for sec in summary.sections
+    ]
+    tokenized_sections = [_tokenize(t) for t in section_texts]
+    tokenized_query    = _tokenize(question)
+
+    # 빈 토큰 섹션 필터링
+    valid = [
+        (sec, tok) for sec, tok in zip(summary.sections, tokenized_sections) if tok
+    ]
+    if not valid:
+        return []
+
+    sections_valid, tokenized_valid = zip(*valid)
+    bm25   = BM25Okapi(list(tokenized_valid))
+    scores = bm25.get_scores(tokenized_query)
+
+    ranked = sorted(zip(scores, sections_valid), key=lambda x: x[0], reverse=True)
+    result = [sec for score, sec in ranked[:MAX_SUMMARY_SECTIONS] if score >= BM25_MIN_SCORE]
+
+    if result:
+        logger.debug(
+            "섹션 BM25 선택 %d개 (top=%.3f, section=%r)",
+            len(result), ranked[0][0], ranked[0][1].section,
+        )
+    else:
+        logger.debug(
+            "섹션 BM25 임계값 미달 — 전체 섹션 fallback (top score=%.3f)",
+            ranked[0][0] if ranked else 0,
+        )
+        # 임계값 미달 시 상위 섹션만이라도 넘김 (완전 공백 방지)
+        result = [sec for _, sec in ranked[:MAX_SUMMARY_SECTIONS]]
+
+    return result
 
 
 def _find_relevant_chunks_bm25(question: str, raw_chunks: list[str]) -> list[str]:
     """
     BM25Okapi로 질문과 관련성 높은 원문 청크 상위 MAX_RAW_CHUNKS개 반환.
     BM25_MIN_SCORE 미만인 청크는 노이즈로 판단해 제외.
-    점수가 모두 0이면 빈 리스트 반환 (fallback 없음 — hallucination 방지).
     """
     if not raw_chunks:
         return []
@@ -67,7 +101,6 @@ def _find_relevant_chunks_bm25(question: str, raw_chunks: list[str]) -> list[str
     tokenized_chunks = [_tokenize(c) for c in raw_chunks]
     tokenized_query  = _tokenize(question)
 
-    # 토큰이 하나도 없는 청크가 있으면 BM25가 오작동하므로 필터링
     valid = [(chunk, tok) for chunk, tok in zip(raw_chunks, tokenized_chunks) if tok]
     if not valid:
         return []
@@ -76,7 +109,6 @@ def _find_relevant_chunks_bm25(question: str, raw_chunks: list[str]) -> list[str
     bm25   = BM25Okapi(list(tokenized_valid))
     scores = bm25.get_scores(tokenized_query)
 
-    # 스코어 기준 내림차순 정렬 후 임계값 이상만 선택
     ranked = sorted(zip(scores, chunks_valid), key=lambda x: x[0], reverse=True)
     result = [chunk for score, chunk in ranked[:MAX_RAW_CHUNKS] if score >= BM25_MIN_SCORE]
 
@@ -140,11 +172,11 @@ def ask(
         question:   질문 문자열
         summary:    LLM 요약 결과 (SummaryResult)
         raw_chunks: 원문 청크 텍스트 리스트 (BM25 검색용)
-                    None이면 요약 섹션만 context로 사용 (기존 동작 유지)
+                    None이면 요약 섹션만 context로 사용
     """
     logger.info("Q&A 시작 — 질문: %r", question[:50])
 
-    relevant_sections = _find_relevant_sections(question, summary)
+    relevant_sections = _find_relevant_sections_bm25(question, summary)
     relevant_chunks   = _find_relevant_chunks_bm25(question, raw_chunks or [])
 
     if not relevant_sections and not relevant_chunks:
