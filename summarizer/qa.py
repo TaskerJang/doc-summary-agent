@@ -59,31 +59,32 @@ def _fix_tilde(text: str) -> str:
     return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
 
 
-def _best_bullet(question: str, bullets: list[str]) -> str:
+def _best_bullet_by_answer(answer: str, bullets: list[str]) -> str:
     """
-    질문과 가장 관련 있는 bullet을 BM25로 선택.
-    bullet이 1개이거나 BM25 점수가 모두 0이면 첫 번째 bullet 반환.
+    LLM 답변 본문과 가장 토큰 겹침이 많은 bullet을 snippet으로 선택.
+    겹치는 토큰이 없으면 첫 번째 bullet 반환.
     """
     if not bullets:
         return ""
     if len(bullets) == 1:
         return bullets[0]
 
-    tokenized_bullets = [_tokenize(b) for b in bullets]
-    tokenized_query   = _tokenize(question)
-
-    valid = [(b, tok) for b, tok in zip(bullets, tokenized_bullets) if tok]
-    if not valid:
+    answer_tokens = set(_tokenize(answer))
+    if not answer_tokens:
         return bullets[0]
 
-    bullets_valid, tokenized_valid = zip(*valid)
-    bm25   = BM25Okapi(list(tokenized_valid))
-    scores = bm25.get_scores(tokenized_query)
+    scored = []
+    for b in bullets:
+        b_tokens = set(_tokenize(b))
+        overlap  = len(answer_tokens & b_tokens)
+        scored.append((overlap, b))
 
-    best_idx = int(max(range(len(scores)), key=lambda i: scores[i]))
-    if scores[best_idx] == 0:
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_bullet = scored[0]
+
+    if best_score == 0:
         return bullets[0]
-    return bullets_valid[best_idx]
+    return best_bullet
 
 
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
@@ -173,9 +174,9 @@ def _build_context(relevant_sections: list, relevant_chunks: list[str]) -> str:
     return "\n\n".join(parts)
 
 
-def _make_sources(question: str, relevant_sections: list) -> list[SourceItem]:
+def _make_sources(answer: str, relevant_sections: list) -> list[SourceItem]:
     """
-    섹션명 기준 dedup 후 질문과 가장 관련 있는 bullet을 BM25로 선택해 snippet으로 사용.
+    섹션명 기준 dedup 후 LLM 답변과 토큰 겹침이 가장 많은 bullet을 snippet으로 선택.
     ~ 취소선 방지 처리 적용.
     """
     seen: set[str] = set()
@@ -185,7 +186,7 @@ def _make_sources(question: str, relevant_sections: list) -> list[SourceItem]:
         if key in seen:
             continue
         seen.add(key)
-        snippet = _fix_tilde(_best_bullet(question, sec.bullets))
+        snippet = _fix_tilde(_best_bullet_by_answer(answer, sec.bullets))
         result.append(SourceItem(section=key, snippet=snippet))
     return result
 
@@ -218,7 +219,6 @@ def ask(
         )
 
     context = _build_context(relevant_sections, relevant_chunks)
-    sources = _make_sources(question, relevant_sections)
 
     template    = QA_PROMPT_PATH.read_text(encoding="utf-8")
     user_prompt = template.format(question=question, context=context)
@@ -241,6 +241,9 @@ def ask(
         if _is_unanswerable(raw):
             logger.info("LLM 답변 불가 패턴 감지 — is_answerable=False 처리")
             return QAResult(answer=raw, sources=[], is_answerable=False)
+
+        # 답변 본문 기준으로 snippet 선택
+        sources = _make_sources(raw, relevant_sections)
 
         logger.info("Q&A 완료 — 출처 섹션 %d개, 원문 청크 %d개", len(sources), len(relevant_chunks))
         return QAResult(answer=raw, sources=sources, is_answerable=True)
