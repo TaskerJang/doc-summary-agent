@@ -67,7 +67,6 @@ def _best_bullet(question: str, bullets: list[str]) -> str:
     scores = bm25.get_scores(tokenized_query)
 
     best_idx = int(max(range(len(scores)), key=lambda i: scores[i]))
-    # 모든 점수가 0이면 첫 번째 bullet fallback
     if scores[best_idx] == 0:
         return bullets[0]
     return bullets_valid[best_idx]
@@ -76,8 +75,7 @@ def _best_bullet(question: str, bullets: list[str]) -> str:
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     """
     BM25Okapi로 요약 섹션 중 질문과 관련성 높은 상위 MAX_SUMMARY_SECTIONS개 반환.
-    각 섹션의 검색 대상 텍스트 = 섹션명 + 모든 bullet 합산.
-    BM25_MIN_SCORE 미만이면 노이즈로 판단해 제외.
+    BM25_MIN_SCORE 미만이면 제외 — fallback 없음 (무관한 질문엔 빈 리스트 반환).
     """
     if not summary.sections:
         return []
@@ -109,10 +107,9 @@ def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
         )
     else:
         logger.debug(
-            "섹션 BM25 임계값 미달 — fallback (top score=%.3f)",
+            "섹션 BM25 임계값 미달 — 섹션 없음 (top score=%.3f)",
             ranked[0][0] if ranked else 0,
         )
-        result = [sec for _, sec in ranked[:MAX_SUMMARY_SECTIONS]]
 
     return result
 
@@ -207,7 +204,7 @@ def ask(
     if not relevant_sections and not relevant_chunks:
         logger.warning("관련 섹션/청크 없음 — 답변 불가")
         return QAResult(
-            answer="문서에서 해당 질문에 대한 내용을 찾을 수 없습니다.",
+            answer="문서에서 해당 내용을 찾을 수 없습니다.",
             sources=[],
             is_answerable=False,
         )

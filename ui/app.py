@@ -55,6 +55,7 @@ def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
 # ── 헬퍼: Q&A 답변 전송 (인라인 출처) ────────────────────
 async def _send_qa_answer(qa_result) -> None:
     if not qa_result.is_answerable:
+        # 답변 불가 시 출처 블록 없이 안내 메시지만 출력
         await cl.Message(content=f"⚠️ {qa_result.answer}").send()
         return
 
