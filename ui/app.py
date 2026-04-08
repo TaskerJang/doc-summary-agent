@@ -54,14 +54,17 @@ def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
 
 # ── 헬퍼: Q&A 답변 전송 (인라인 출처) ────────────────────
 async def _send_qa_answer(qa_result) -> None:
+    msg = cl.Message(content="")
+    await msg.send()
+
     if not qa_result.is_answerable:
-        # 답변 불가 시 출처 블록 없이 안내 메시지만 출력
-        await cl.Message(content=f"⚠️ {qa_result.answer}").send()
+        # 답변 불가 시 출처 블록 없이 안내 메시지만 스트리밍
+        for ch in f"⚠️ {qa_result.answer}":
+            await msg.stream_token(ch)
+        await msg.update()
         return
 
     answer = _fix_tilde(qa_result.answer)
-    msg = cl.Message(content="")
-    await msg.send()
     for ch in answer:
         await msg.stream_token(ch)
 
