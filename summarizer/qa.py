@@ -20,6 +20,20 @@ MAX_RAW_CHUNKS       = 3
 # 원문 청크 BM25 임계값 (섹션 검색에는 미적용)
 CHUNK_BM25_MIN_SCORE = 0.1
 
+# LLM이 "찾을 수 없음"으로 답했다고 판단하는 패턴
+_UNANSWERABLE_PATTERNS = [
+    "찾을 수 없",
+    "해당 내용을 찾",
+    "문서에서 확인할 수 없",
+    "문서에 없",
+    "제공된 문서에는",
+]
+
+
+def _is_unanswerable(text: str) -> bool:
+    """LLM 답변이 '찾을 수 없음' 패턴인지 확인."""
+    return any(p in text for p in _UNANSWERABLE_PATTERNS)
+
 
 class SourceItem:
     """출처 섹션명 + 핵심 내용 한 줄."""
@@ -222,6 +236,12 @@ def ask(
             ],
             max_tokens=500,
         )
+
+        # LLM이 "찾을 수 없음"으로 답한 경우 출처 없이 처리
+        if _is_unanswerable(raw):
+            logger.info("LLM 답변 불가 패턴 감지 — is_answerable=False 처리")
+            return QAResult(answer=raw, sources=[], is_answerable=False)
+
         logger.info("Q&A 완료 — 출처 섹션 %d개, 원문 청크 %d개", len(sources), len(relevant_chunks))
         return QAResult(answer=raw, sources=sources, is_answerable=True)
 
@@ -229,7 +249,7 @@ def ask(
         logger.error("Q&A 생성 실패: %s", e)
         return QAResult(
             answer="[답변 생성 실패]",
-            sources=sources,
+            sources=[],
             is_answerable=False,
         )
 
