@@ -17,8 +17,8 @@ FOLLOW_UP_PROMPT_PATH = PROMPTS_DIR / "follow_up_v1.md"
 MAX_SUMMARY_SECTIONS = 3
 MAX_RAW_CHUNKS       = 3
 
-# BM25 최소 스코어 임계값
-BM25_MIN_SCORE = 0.1
+# 원문 청크 BM25 임계값 (섹션 검색에는 미적용)
+CHUNK_BM25_MIN_SCORE = 0.1
 
 
 class SourceItem:
@@ -75,7 +75,7 @@ def _best_bullet(question: str, bullets: list[str]) -> str:
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     """
     BM25Okapi로 요약 섹션 중 질문과 관련성 높은 상위 MAX_SUMMARY_SECTIONS개 반환.
-    BM25_MIN_SCORE 미만이면 제외 — fallback 없음 (무관한 질문엔 빈 리스트 반환).
+    임계값 없이 항상 상위 섹션을 반환 — 무관 질문 판별은 LLM에 위임.
     """
     if not summary.sections:
         return []
@@ -98,26 +98,20 @@ def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     scores = bm25.get_scores(tokenized_query)
 
     ranked = sorted(zip(scores, sections_valid), key=lambda x: x[0], reverse=True)
-    result = [sec for score, sec in ranked[:MAX_SUMMARY_SECTIONS] if score >= BM25_MIN_SCORE]
+    result = [sec for _, sec in ranked[:MAX_SUMMARY_SECTIONS]]
 
-    if result:
-        logger.debug(
-            "섹션 BM25 선택 %d개 (top=%.3f, section=%r)",
-            len(result), ranked[0][0], ranked[0][1].section,
-        )
-    else:
-        logger.debug(
-            "섹션 BM25 임계값 미달 — 섹션 없음 (top score=%.3f)",
-            ranked[0][0] if ranked else 0,
-        )
-
+    logger.debug(
+        "섹션 BM25 선택 %d개 (top=%.3f, section=%r)",
+        len(result), ranked[0][0] if ranked else 0,
+        ranked[0][1].section if ranked else "",
+    )
     return result
 
 
 def _find_relevant_chunks_bm25(question: str, raw_chunks: list[str]) -> list[str]:
     """
     BM25Okapi로 질문과 관련성 높은 원문 청크 상위 MAX_RAW_CHUNKS개 반환.
-    BM25_MIN_SCORE 미만인 청크는 노이즈로 판단해 제외.
+    CHUNK_BM25_MIN_SCORE 미만인 청크는 노이즈로 판단해 제외.
     """
     if not raw_chunks:
         return []
@@ -134,7 +128,7 @@ def _find_relevant_chunks_bm25(question: str, raw_chunks: list[str]) -> list[str
     scores = bm25.get_scores(tokenized_query)
 
     ranked = sorted(zip(scores, chunks_valid), key=lambda x: x[0], reverse=True)
-    result = [chunk for score, chunk in ranked[:MAX_RAW_CHUNKS] if score >= BM25_MIN_SCORE]
+    result = [chunk for score, chunk in ranked[:MAX_RAW_CHUNKS] if score >= CHUNK_BM25_MIN_SCORE]
 
     if result:
         logger.debug("BM25 선택 청크 %d개 (top score=%.3f)", len(result), ranked[0][0])
