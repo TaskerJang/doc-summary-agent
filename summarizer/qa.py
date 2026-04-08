@@ -45,6 +45,34 @@ def _fix_tilde(text: str) -> str:
     return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
 
 
+def _best_bullet(question: str, bullets: list[str]) -> str:
+    """
+    질문과 가장 관련 있는 bullet을 BM25로 선택.
+    bullet이 1개이거나 BM25 점수가 모두 0이면 첫 번째 bullet 반환.
+    """
+    if not bullets:
+        return ""
+    if len(bullets) == 1:
+        return bullets[0]
+
+    tokenized_bullets = [_tokenize(b) for b in bullets]
+    tokenized_query   = _tokenize(question)
+
+    valid = [(b, tok) for b, tok in zip(bullets, tokenized_bullets) if tok]
+    if not valid:
+        return bullets[0]
+
+    bullets_valid, tokenized_valid = zip(*valid)
+    bm25   = BM25Okapi(list(tokenized_valid))
+    scores = bm25.get_scores(tokenized_query)
+
+    best_idx = int(max(range(len(scores)), key=lambda i: scores[i]))
+    # 모든 점수가 0이면 첫 번째 bullet fallback
+    if scores[best_idx] == 0:
+        return bullets[0]
+    return bullets_valid[best_idx]
+
+
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     """
     BM25Okapi로 요약 섹션 중 질문과 관련성 높은 상위 MAX_SUMMARY_SECTIONS개 반환.
@@ -140,9 +168,9 @@ def _build_context(relevant_sections: list, relevant_chunks: list[str]) -> str:
     return "\n\n".join(parts)
 
 
-def _make_sources(relevant_sections: list) -> list[SourceItem]:
+def _make_sources(question: str, relevant_sections: list) -> list[SourceItem]:
     """
-    섹션명 기준 dedup 후 첫 번째 bullet 전체를 snippet으로 사용.
+    섹션명 기준 dedup 후 질문과 가장 관련 있는 bullet을 BM25로 선택해 snippet으로 사용.
     ~ 취소선 방지 처리 적용.
     """
     seen: set[str] = set()
@@ -152,7 +180,7 @@ def _make_sources(relevant_sections: list) -> list[SourceItem]:
         if key in seen:
             continue
         seen.add(key)
-        snippet = _fix_tilde(sec.bullets[0].strip()) if sec.bullets else ""
+        snippet = _fix_tilde(_best_bullet(question, sec.bullets))
         result.append(SourceItem(section=key, snippet=snippet))
     return result
 
@@ -185,7 +213,7 @@ def ask(
         )
 
     context = _build_context(relevant_sections, relevant_chunks)
-    sources = _make_sources(relevant_sections)
+    sources = _make_sources(question, relevant_sections)
 
     template    = QA_PROMPT_PATH.read_text(encoding="utf-8")
     user_prompt = template.format(question=question, context=context)
