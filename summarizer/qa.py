@@ -19,6 +19,9 @@ MAX_RAW_CHUNKS       = 3
 # BM25 최소 스코어 임계값 — 이 이하면 관련 없는 청크로 판단해 제외
 BM25_MIN_SCORE = 0.1
 
+# 출처 snippet 최대 길이
+SNIPPET_MAX_LEN = 60
+
 
 class SourceItem:
     """출처 섹션명 + 핵심 내용 한 줄."""
@@ -107,11 +110,21 @@ def _build_context(relevant_sections: list, relevant_chunks: list[str]) -> str:
 
 
 def _make_sources(relevant_sections: list) -> list[SourceItem]:
-    """섹션명 + 첫 번째 bullet을 출처 아이템으로 변환."""
+    """
+    섹션명 기준 dedup 후 첫 번째 bullet을 snippet으로 사용.
+    snippet은 SNIPPET_MAX_LEN자로 truncate.
+    """
+    seen: set[str] = set()
     result = []
     for sec in relevant_sections:
-        snippet = sec.bullets[0] if sec.bullets else ""
-        result.append(SourceItem(section=sec.section, snippet=snippet))
+        key = sec.section.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        raw_snippet = sec.bullets[0].strip() if sec.bullets else ""
+        if len(raw_snippet) > SNIPPET_MAX_LEN:
+            raw_snippet = raw_snippet[:SNIPPET_MAX_LEN].rsplit(" ", 1)[0] + "…"
+        result.append(SourceItem(section=key, snippet=raw_snippet))
     return result
 
 
