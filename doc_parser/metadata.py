@@ -81,7 +81,13 @@ def _extract_docx(file_path: Path) -> dict:
     doc = Document(file_path)
     props = doc.core_properties
 
-    language = props.language.split("-")[0] if props.language else None
+    # core_properties.language가 비어있으면 본문 텍스트로 langdetect fallback
+    language = None
+    if props.language:
+        language = props.language.split("-")[0]
+    else:
+        sample = " ".join(p.text for p in doc.paragraphs[:20] if p.text.strip())
+        language = _detect_language(sample)
 
     return dict(
         language=language,

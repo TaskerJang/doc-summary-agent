@@ -27,16 +27,26 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
     )
 
 
-# ── 헬퍼: 섹션명 정제 (## ** 제거) ───────────────────────
+# ── 헬퍼: 섹션명 정제 (## ** 제거, no section 대체) ───────
 def _clean(name: str) -> str:
     name = re.sub(r"^#+\s*", "", name)
     name = re.sub(r"\*+", "", name)
-    return name.strip()
+    name = name.strip()
+    if not name or name.lower() in ("no section", "(no section)"):
+        return "문서 본문"
+    return name
 
 
 # ── 헬퍼: ~~ 취소선 방지 ──────────────────────────────────
 def _fix_tilde(text: str) -> str:
     return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
+
+
+# ── 헬퍼: None 메타값 표시용 ─────────────────────────────
+def _fmt(value, suffix: str = "") -> str:
+    if value is None:
+        return "-"
+    return f"{value}{suffix}"
 
 
 # ── 추천 질문 생성 (LLM 기반) ─────────────────────────────
@@ -58,7 +68,6 @@ async def _send_qa_answer(qa_result) -> None:
     await msg.send()
 
     if not qa_result.is_answerable:
-        # 답변 불가 시 출처 블록 없이 안내 메시지만 스트리밍
         for ch in f"⚠️ {qa_result.answer}":
             await msg.stream_token(ch)
         await msg.update()
@@ -107,6 +116,7 @@ async def on_message(message: cl.Message):
             new_path = tmp_path.with_suffix(suffix)
             tmp_path.rename(new_path)
             tmp_path = new_path
+
         # ── TaskList 초기화 ────────────────────────────────
         task_list = cl.TaskList()
         task_list.status = "분석 중..."
@@ -131,14 +141,13 @@ async def on_message(message: cl.Message):
             await cl.Message(content=f"❌ 파싱 실패: {step1.get('parse_error', '알 수 없는 오류')}").send()
             return
 
-        meta = step1.get("metadata", {})
+        meta       = step1.get("metadata", {})
+        page_count = _fmt(meta.get("page_count"), "페이지")
+        language   = _fmt(meta.get("language"))
+        clean_len  = f"{step1.get('clean_len', 0):,}자"
+
         task1.status = cl.TaskStatus.DONE
-        task1.title  = (
-            f"Step 1 · 파싱 완료 — "
-            f"{meta.get('page_count', '-')}페이지 · "
-            f"{step1.get('clean_len', 0):,}자 · "
-            f"언어 {meta.get('language', '-')}"
-        )
+        task1.title  = f"Step 1 · 파싱 완료 — {page_count} · {clean_len} · 언어 {language}"
         task2.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
