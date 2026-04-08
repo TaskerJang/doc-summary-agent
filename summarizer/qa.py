@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from pathlib import Path
 
 from rank_bm25 import BM25Okapi
@@ -39,8 +40,12 @@ class QAResult:
 
 def _tokenize(text: str) -> list[str]:
     """간단한 공백/구두점 기반 토크나이저 (한국어 포함)."""
-    import re
     return re.findall(r"[가-힣a-zA-Z0-9]+", text)
+
+
+def _fix_tilde(text: str) -> str:
+    """숫자 범위의 ~ 를 - 로 치환해 Chainlit 취소선 렌더링 방지."""
+    return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
 
 
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
@@ -52,7 +57,6 @@ def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     if not summary.sections:
         return []
 
-    # 섹션별 검색 텍스트 구성
     section_texts = [
         sec.section + " " + " ".join(sec.bullets)
         for sec in summary.sections
@@ -60,7 +64,6 @@ def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     tokenized_sections = [_tokenize(t) for t in section_texts]
     tokenized_query    = _tokenize(question)
 
-    # 빈 토큰 섹션 필터링
     valid = [
         (sec, tok) for sec, tok in zip(summary.sections, tokenized_sections) if tok
     ]
@@ -81,10 +84,9 @@ def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
         )
     else:
         logger.debug(
-            "섹션 BM25 임계값 미달 — 전체 섹션 fallback (top score=%.3f)",
+            "섹션 BM25 임계값 미달 — fallback (top score=%.3f)",
             ranked[0][0] if ranked else 0,
         )
-        # 임계값 미달 시 상위 섹션만이라도 넘김 (완전 공백 방지)
         result = [sec for _, sec in ranked[:MAX_SUMMARY_SECTIONS]]
 
     return result
@@ -144,7 +146,7 @@ def _build_context(relevant_sections: list, relevant_chunks: list[str]) -> str:
 def _make_sources(relevant_sections: list) -> list[SourceItem]:
     """
     섹션명 기준 dedup 후 첫 번째 bullet을 snippet으로 사용.
-    snippet은 SNIPPET_MAX_LEN자로 truncate.
+    snippet은 SNIPPET_MAX_LEN자로 truncate하고 ~ 취소선 방지 처리.
     """
     seen: set[str] = set()
     result = []
@@ -154,6 +156,7 @@ def _make_sources(relevant_sections: list) -> list[SourceItem]:
             continue
         seen.add(key)
         raw_snippet = sec.bullets[0].strip() if sec.bullets else ""
+        raw_snippet = _fix_tilde(raw_snippet)
         if len(raw_snippet) > SNIPPET_MAX_LEN:
             raw_snippet = raw_snippet[:SNIPPET_MAX_LEN].rsplit(" ", 1)[0] + "…"
         result.append(SourceItem(section=key, snippet=raw_snippet))
