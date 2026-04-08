@@ -4,14 +4,21 @@ Chainlit UI 진입점 — ChatGPT 스타일
 파일 업로드 → TaskList 진행 표시 → 전체 요약 → PDF 원문 → 추천 질문 → Q&A
 """
 import asyncio
+import os
 import re
 from pathlib import Path
 
 import chainlit as cl
+from literalai import LiteralClient
 
 from main import run_step1, run_step2, run_step3
 from summarizer.llm import SummaryResult, SectionSummary
 from summarizer.qa import ask, generate_follow_ups
+
+# ── LiteralAI 데이터 레이어 (세션 히스토리 사이드바) ──────
+_literal_api_key = os.getenv("LITERAL_API_KEY")
+if _literal_api_key:
+    cl.data_layer = LiteralClient(api_key=_literal_api_key)
 
 
 # ── 헬퍼: result dict → SummaryResult 복원 ────────────────
@@ -42,7 +49,7 @@ def _fix_tilde(text: str) -> str:
     return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
 
 
-# ── 헬퍼: None 메타값 표시용 ─────────────────────────────
+# ── 헬퍼: None 메타값 표시용 ──────────────────────────────
 def _fmt(value, suffix: str = "") -> str:
     if value is None:
         return "-"
