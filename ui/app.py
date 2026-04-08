@@ -65,10 +65,15 @@ async def _send_qa_answer(qa_result) -> None:
         await msg.stream_token(ch)
 
     if qa_result.sources:
-        sources_text = "\n".join(
-            f"`{i+1}` {_clean(s)}"
-            for i, s in enumerate(qa_result.sources)
-        )
+        lines = []
+        for i, s in enumerate(qa_result.sources):
+            section = _clean(s.section)
+            snippet = s.snippet.strip() if s.snippet else ""
+            if snippet:
+                lines.append(f"`{i+1}` **{section}** — {snippet}")
+            else:
+                lines.append(f"`{i+1}` **{section}**")
+        sources_text = "\n".join(lines)
         await msg.stream_token(f"\n\n---\n📌 **출처**\n{sources_text}")
 
     await msg.update()
