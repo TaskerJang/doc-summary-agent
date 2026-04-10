@@ -18,9 +18,10 @@ PROMPTS_DIR           = Path(__file__).parent / "prompts"
 QA_PROMPT_PATH        = PROMPTS_DIR / "qa_v1.md"
 FOLLOW_UP_PROMPT_PATH = PROMPTS_DIR / "follow_up_v1.md"
 
-MAX_SUMMARY_SECTIONS = 3
-MAX_RAW_CHUNKS       = 3
-CHUNK_BM25_MIN_SCORE = 0.1
+MAX_SUMMARY_SECTIONS  = 3
+MAX_RAW_CHUNKS        = 3
+CHUNK_BM25_MIN_SCORE  = 0.1
+SECTION_BM25_MIN_SCORE = 0.1   # 섹션도 최소 점수 필터 추가
 
 # 추천 질문 생성 컨텍스트에서 제거할 OCR 노이즈 패턴
 _OCR_NOISE_RE = re.compile(
@@ -100,7 +101,8 @@ def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     bm25   = BM25Okapi(list(tokenized_valid))
     scores = bm25.get_scores(tokenized_query)
     ranked = sorted(zip(scores, sections_valid), key=lambda x: x[0], reverse=True)
-    return [sec for _, sec in ranked[:MAX_SUMMARY_SECTIONS]]
+    # 섹션도 최소 점수 필터 적용
+    return [sec for score, sec in ranked[:MAX_SUMMARY_SECTIONS] if score >= SECTION_BM25_MIN_SCORE]
 
 
 def _find_relevant_chunks_bm25(question: str, raw_chunks: list[str]) -> list[str]:
@@ -132,7 +134,7 @@ def _build_context(
         parts.append("## 요약 섹션")
         for sec in relevant_sections:
             parts.append(f"[{sec.section}]\n" + "\n".join(f"- {b}" for b in sec.bullets))
-    # BM25 매칭이 없을 때 전체 요약으로 fallback
+    # BM25 매칭 없으면 전체 요약 fallback
     if not relevant_sections and not relevant_chunks and overall:
         parts.append("## 전체 요약")
         parts.append(overall[:3000])
@@ -171,15 +173,14 @@ def ask(
 
     relevant_chunks = _find_relevant_chunks_bm25(question, raw_chunks or [])
 
-    # BM25 매칭 없고 overall도 없으면 답변 불가
-    if not relevant_sections and not relevant_chunks and not summary.overall:
-        logger.warning("관련 섹션/청크 없음 — 답변 불가")
-        return QAResult(answer="문서에서 해당 내용을 찾을 수 없습니다.", sources=[], is_answerable=False)
-
-    context = _build_context(relevant_sections, relevant_chunks, overall=summary.overall)
-    if not relevant_sections and not relevant_chunks:
+    use_overall_fallback = not relevant_sections and not relevant_chunks
+    if use_overall_fallback:
+        if not summary.overall:
+            logger.warning("BM25 매칭 없음 + overall 없음 — 답변 불가")
+            return QAResult(answer="문서에서 해당 내용을 찾을 수 없습니다.", sources=[], is_answerable=False)
         logger.info("BM25 매칭 없음 — overall fallback 사용")
 
+    context = _build_context(relevant_sections, relevant_chunks, overall=summary.overall)
     template    = QA_PROMPT_PATH.read_text(encoding="utf-8")
     user_prompt = template.format(question=question, context=context)
 
@@ -189,7 +190,8 @@ def ask(
                 {"role": "system", "content": (
                     "당신은 금융 문서 내용을 기반으로 질문에 답변하는 전문 AI입니다. "
                     "제공된 문서 내용에만 근거하여 답변하세요. "
-                    "원문 발췌가 있으면 요약 섹션보다 원문 발췌를 우선 참조하세요. "
+                    "원문 발췌 > 요약 섹션 > 전체 요약 순으로 우선 참조하세요. "
+                    "전체 요약에 답이 있으면 반드시 그 내용을 바탕으로 답변하세요. "
                     "문서에 없는 내용은 절대 생성하지 마세요."
                 )},
                 {"role": "user", "content": user_prompt},
@@ -217,7 +219,6 @@ def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
     if not summary.overall:
         return defaults
 
-    # overall(전체 요약)을 컨텍스트로 사용 — OCR 노이즈 적음
     overall_context = _strip_ocr_noise(summary.overall)
     if not overall_context.strip():
         return defaults
