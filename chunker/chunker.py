@@ -17,9 +17,9 @@ SKIP_SECTION_KEYWORDS: frozenset[str] = frozenset({
     "보도출처",
 })
 
-# C-04, C-05: eval 결과 반영 — chunk_size=500 / chunk_overlap=100 채택
-# (6개 조합 비교 기준 Faithfulness 최고: 30/40, 75.0%)
-DEFAULT_CHUNK_SIZE = 500
+# C-04, C-05: eval 결과 반영 — chunk_size=300 / chunk_overlap=100 채택
+# (hyperparam_v3, 6개 조합 비교 기준 전 지표 1위: ROUGE-L 0.3151, NumAcc 0.6763, Faithfulness 29/40 72.5%)
+DEFAULT_CHUNK_SIZE = 300
 DEFAULT_CHUNK_OVERLAP = 100
 DEFAULT_MIN_CHUNK_SIZE = 50
 
