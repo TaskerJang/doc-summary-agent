@@ -6,6 +6,8 @@ eval/run_eval.py
     uv run python eval/run_eval.py
     uv run python eval/run_eval.py --chunk-size 500 700 1000
     uv run python eval/run_eval.py --chunk-overlap 50 100 200
+    uv run python eval/run_eval.py --chunk-size 500 --chunk-overlap 100 --tag baseline_v3
+    uv run python eval/run_eval.py --chunk-size 500 --chunk-overlap 100 --no-bm25 --tag no_bm25_v3
     uv run python eval/run_eval.py --doc 한화투자증권_두산밥캣_기업분석_리포트.pdf
 """
 import argparse
@@ -83,20 +85,30 @@ def run_pipeline(
     return step3
 
 
-def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict) -> dict:
-    """단일 QA 쌍에 대해 모든 지표를 계산한다."""
+def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: bool = True) -> dict:
+    """단일 QA 쌍에 대해 모든 지표를 계산한다.
+
+    Args:
+        use_bm25: False면 raw_chunks=[] 전달 + pinned_section_indices=[] 로
+                  BM25 섹션/청크 검색을 모두 비활성화 (BM25 도입 전 기준값 측정용)
+    """
     question  = qa["question"]
     reference = qa["answer"]
     qa_type   = qa["type"]
 
-    # 원문 청크 추출 — Completeness 개선을 위해 ask()에 전달
-    raw_chunks = _extract_raw_chunks(step3)
+    if use_bm25:
+        # BM25 활성화: 원문 청크 전달 → _find_relevant_chunks_bm25 + _find_relevant_sections_bm25 동작
+        raw_chunks          = _extract_raw_chunks(step3)
+        pinned_indices      = None
+    else:
+        # BM25 비활성화: 청크·섹션 BM25 검색 모두 스킵 → overall fallback만 사용
+        raw_chunks          = []
+        pinned_indices      = []   # 빈 리스트 → relevant_sections = []
 
-    # Q&A 답변 생성 (원문 청크 포함)
-    qa_result  = ask(question, summary, raw_chunks=raw_chunks)
+    qa_result  = ask(question, summary, raw_chunks=raw_chunks,
+                     pinned_section_indices=pinned_indices)
     prediction = qa_result.answer if qa_result.is_answerable else "[답변 불가]"
 
-    # 자동 평가
     rouge   = compute_rouge(prediction, reference)
     num_acc = compute_numerical_accuracy(prediction, reference)
 
@@ -114,9 +126,9 @@ def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict) -> dict:
         "num_accuracy":   num_acc["accuracy"],
         "num_matched":    num_acc["matched"],
         "num_missed":     num_acc["missed"],
+        "bm25_enabled":   use_bm25,
     }
 
-    # LLM Judge
     source_text = step3.get("clean_text", "")
     judge = judge_faithfulness(source_text, prediction)
     result.update({
@@ -139,6 +151,7 @@ def run_eval(
     chunk_sizes: list[int] | None = None,
     chunk_overlaps: list[int] | None = None,
     filter_doc: str | None = None,
+    use_bm25: bool = True,
 ) -> list[dict]:
     """전체 평가 파이프라인 실행."""
     if chunk_sizes is None:
@@ -163,8 +176,8 @@ def run_eval(
 
         for chunk_size in chunk_sizes:
             for chunk_overlap in chunk_overlaps:
-                logger.info("=== 문서: %s | chunk_size: %s | chunk_overlap: %s ===",
-                            doc_name, chunk_size, chunk_overlap)
+                logger.info("=== 문서: %s | chunk_size: %s | chunk_overlap: %s | bm25: %s ===",
+                            doc_name, chunk_size, chunk_overlap, use_bm25)
                 step3 = run_pipeline(doc_path, chunk_size, chunk_overlap)
                 if step3.get("status") == "error":
                     logger.error("파이프라인 실패: %s", step3)
@@ -176,7 +189,7 @@ def run_eval(
                     continue
 
                 for qa in qas:
-                    result = evaluate_qa(qa, summary, step3)
+                    result = evaluate_qa(qa, summary, step3, use_bm25=use_bm25)
                     result["chunk_size"]    = chunk_size
                     result["chunk_overlap"] = chunk_overlap
                     all_results.append(result)
@@ -217,8 +230,9 @@ def print_summary(results: list[dict]) -> None:
     avg_comp  = sum(comp_vals) / len(comp_vals) if comp_vals else 0.0
     avg_conc  = sum(conc_vals) / len(conc_vals) if conc_vals else 0.0
 
+    bm25_flag = results[0].get("bm25_enabled", True)
     print("\n" + "=" * 60)
-    print(f"📊 평가 결과 요약  (총 {total}개 QA)")
+    print(f"📊 평가 결과 요약  (총 {total}개 QA | BM25: {'ON' if bm25_flag else 'OFF'})")
     print("=" * 60)
     print(f"  ROUGE-1:           {avg_rouge1:.4f}")
     print(f"  ROUGE-2:           {avg_rouge2:.4f}")
@@ -247,6 +261,8 @@ def main():
                         help="특정 문서만 평가 (파일명)")
     parser.add_argument("--tag",  type=str, default="",
                         help="결과 파일 태그")
+    parser.add_argument("--no-bm25", action="store_true",
+                        help="BM25 검색 비활성화 (섹션·청크 BM25 모두 OFF, overall fallback만 사용) — BM25 도입 전 기준값 측정용")
     args = parser.parse_args()
 
     qa_pairs = json.loads(QA_PATH.read_text(encoding="utf-8"))
@@ -258,6 +274,7 @@ def main():
         chunk_sizes=args.chunk_size,
         chunk_overlaps=args.chunk_overlap,
         filter_doc=args.doc or None,
+        use_bm25=not args.no_bm25,
     )
 
     save_results(results, tag=args.tag)
