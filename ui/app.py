@@ -27,6 +27,12 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
     )
 
 
+# ── 헬퍼: result dict → raw_chunks 텍스트 리스트 추출 ─────
+def _to_raw_chunks(result: dict) -> list[str]:
+    chunks = result.get("chunks", [])
+    return [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
+
+
 # ── 헬퍼: 섹션명 정제 (## ** 제거, no section 대체) ───────
 def _clean(name: str) -> str:
     name = re.sub(r"^#+\s*", "", name)
@@ -96,6 +102,7 @@ async def _send_qa_answer(qa_result) -> None:
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("result", None)
+    cl.user_session.set("raw_chunks", [])
     await cl.Message(
         content="안녕하세요! 📄 아래 **파일 업로드 버튼**으로 문서를 업로드해 주세요.\n\nPDF · DOCX · HWP · DOC 형식을 지원합니다."
     ).send()
@@ -184,8 +191,9 @@ async def on_message(message: cl.Message):
 
         await task_list.send()
 
-        # ── 결과 저장 ──────────────────────────────────────
+        # ── 결과 저장 (raw_chunks 포함) ────────────────────
         cl.user_session.set("result", step3)
+        cl.user_session.set("raw_chunks", _to_raw_chunks(step3))
         summary = _to_summary_result(step3)
 
         # ── 전체 요약 스트리밍 ─────────────────────────────
@@ -235,8 +243,9 @@ async def on_message(message: cl.Message):
         await cl.Message(content="요약 결과가 없어 Q&A를 실행할 수 없습니다.").send()
         return
 
-    question  = message.content
-    qa_result = await asyncio.to_thread(ask, question, summary)
+    question   = message.content
+    raw_chunks = cl.user_session.get("raw_chunks") or []
+    qa_result  = await asyncio.to_thread(ask, question, summary, raw_chunks)
     await _send_qa_answer(qa_result)
 
 
@@ -245,8 +254,9 @@ async def on_message(message: cl.Message):
 async def on_followup(action: cl.Action):
     question = action.payload["value"]
 
-    result  = cl.user_session.get("result")
-    summary = _to_summary_result(result)
+    result     = cl.user_session.get("result")
+    raw_chunks = cl.user_session.get("raw_chunks") or []
+    summary    = _to_summary_result(result)
 
     if not summary:
         await cl.Message(content="요약 결과가 없어 Q&A를 실행할 수 없습니다.").send()
@@ -254,5 +264,5 @@ async def on_followup(action: cl.Action):
 
     await cl.Message(content=question, author="user").send()
 
-    qa_result = await asyncio.to_thread(ask, question, summary)
+    qa_result = await asyncio.to_thread(ask, question, summary, raw_chunks)
     await _send_qa_answer(qa_result)

@@ -258,19 +258,33 @@ def ask(
 
 
 def generate_follow_ups(summary: SummaryResult) -> list[str]:
-    """전체 요약을 바탕으로 추천 질문 3개를 생성한다."""
+    """
+    섹션 bullets 기반으로 추천 질문 3개를 생성한다.
+    overall 대신 실제 섹션 내용을 사용해 LLM이 context에서
+    확실히 답 가능한 질문만 생성하도록 유도한다.
+    """
     defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
 
-    if not summary.overall or summary.overall.startswith("["):
+    if not summary.sections:
         return defaults
+
+    # 섹션 bullets 기반 context 구성 (최대 4개 섹션, 섹션당 3개 bullet)
+    section_lines = []
+    for sec in summary.sections[:4]:
+        bullets_text = "\n".join(f"- {b}" for b in sec.bullets[:3])
+        section_lines.append(f"[{sec.section}]\n{bullets_text}")
+    sections_context = "\n\n".join(section_lines)
 
     try:
         template    = FOLLOW_UP_PROMPT_PATH.read_text(encoding="utf-8")
-        user_prompt = template.format(overall=summary.overall)
+        user_prompt = template.format(overall=sections_context)
 
         raw = _call_api(
             messages=[
-                {"role": "system", "content": "당신은 금융 문서 분석 전문가입니다."},
+                {"role": "system", "content": (
+                    "당신은 금융 문서 분석 전문가입니다. "
+                    "제공된 섹션 내용에 근거해 독자가 실제로 물어볼 만한 구체적인 질문을 생성하세요."
+                )},
                 {"role": "user",   "content": user_prompt},
             ],
             max_tokens=200,
