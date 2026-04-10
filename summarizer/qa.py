@@ -21,12 +21,13 @@ MAX_RAW_CHUNKS       = 3
 CHUNK_BM25_MIN_SCORE = 0.1
 
 # LLM이 "찾을 수 없음"으로 답했다고 판단하는 패턴
+# 주의: 너무 넓으면 정상 답변도 오탐됨 ("문서에 없습니다" 등)
+# → 문장 앞에서만 나타나는 명확한 거절 표현만 포함
 _UNANSWERABLE_PATTERNS = [
-    "찾을 수 없",
-    "해당 내용을 찾",
+    "문서에서 해당 내용을 찾을 수 없",
     "문서에서 확인할 수 없",
-    "문서에 없",
-    "제공된 문서에는",
+    "제공된 문서에는 해당 내용이 없",
+    "해당 정보는 문서에 포함되어 있지 않",
 ]
 
 
@@ -279,11 +280,15 @@ def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
     """
     섹션 bullets 기반으로 추천 질문 3개를 생성한다.
     각 질문에 출처 섹션 인덱스(section_index)를 포함해 반환한다.
+    default fallback은 전체 섹션을 커버하도록 section_indices를 넓게 설정.
     """
+    n = len(summary.sections)
+    all_idx = list(range(n)) if n else [0]
+
     defaults = [
-        FollowUp("재무지표 더 자세히 보여줘", [0]),
-        FollowUp("리스크 요인은 무엇인가요?", [0]),
-        FollowUp("향후 전망은?", [0]),
+        FollowUp("재무지표 더 자세히 보여줘", all_idx),
+        FollowUp("리스크 요인은 무엇인가요?", all_idx),
+        FollowUp("향후 전망은?", all_idx),
     ]
 
     if not summary.sections:
