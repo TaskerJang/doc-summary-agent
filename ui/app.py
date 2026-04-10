@@ -55,16 +55,23 @@ def _fmt(value, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
-# ── 추천 질문 생성 (LLM 기반) ─────────────────────────────
+# ── 추천 질문 생성 (LLM 기반, 섹션 인덱스 포함) ───────────
 def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
-    defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
     if not summary:
-        questions = defaults
-    else:
-        questions = generate_follow_ups(summary)
+        defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
+        return [
+            cl.Action(name="followup", payload={"value": q, "section_indices": [0]}, label=q)
+            for q in defaults
+        ]
+
+    follow_ups = generate_follow_ups(summary)
     return [
-        cl.Action(name="followup", payload={"value": q}, label=q)
-        for q in questions
+        cl.Action(
+            name="followup",
+            payload={"value": fu.question, "section_indices": fu.section_indices},
+            label=fu.question,
+        )
+        for fu in follow_ups
     ]
 
 
@@ -191,7 +198,7 @@ async def on_message(message: cl.Message):
 
         await task_list.send()
 
-        # ── 결과 저장 (raw_chunks 포함) ────────────────────
+        # ── 결과 저장 (raw_chunks 포함) ───────────────────
         cl.user_session.set("result", step3)
         cl.user_session.set("raw_chunks", _to_raw_chunks(step3))
         summary = _to_summary_result(step3)
@@ -252,7 +259,8 @@ async def on_message(message: cl.Message):
 # ── 추천 질문 버튼 클릭 ────────────────────────────────────
 @cl.action_callback("followup")
 async def on_followup(action: cl.Action):
-    question = action.payload["value"]
+    question        = action.payload["value"]
+    section_indices = action.payload.get("section_indices")  # 생성 시점에 고정된 섹션
 
     result     = cl.user_session.get("result")
     raw_chunks = cl.user_session.get("raw_chunks") or []
@@ -264,5 +272,7 @@ async def on_followup(action: cl.Action):
 
     await cl.Message(content=question, author="user").send()
 
-    qa_result = await asyncio.to_thread(ask, question, summary, raw_chunks)
+    qa_result = await asyncio.to_thread(
+        ask, question, summary, raw_chunks, section_indices
+    )
     await _send_qa_answer(qa_result)

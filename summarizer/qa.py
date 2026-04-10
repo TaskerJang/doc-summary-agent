@@ -49,6 +49,13 @@ class QAResult:
         self.is_answerable = is_answerable
 
 
+class FollowUp:
+    """추천 질문 + 출처 섹션 인덱스."""
+    def __init__(self, question: str, section_indices: list[int]):
+        self.question        = question
+        self.section_indices = section_indices
+
+
 def _tokenize(text: str) -> list[str]:
     """간단한 공백/구두점 기반 토크나이저 (한국어 포함)."""
     return re.findall(r"[가-힣a-zA-Z0-9]+", text)
@@ -195,20 +202,32 @@ def ask(
     question: str,
     summary: SummaryResult,
     raw_chunks: list[str] | None = None,
+    pinned_section_indices: list[int] | None = None,
 ) -> QAResult:
     """
     질문에 대한 답변 생성.
 
     Args:
-        question:   질문 문자열
-        summary:    LLM 요약 결과 (SummaryResult)
-        raw_chunks: 원문 청크 텍스트 리스트 (BM25 검색용)
-                    None이면 요약 섹션만 context로 사용
+        question:               질문 문자열
+        summary:                LLM 요약 결과 (SummaryResult)
+        raw_chunks:             원문 청크 텍스트 리스트 (BM25 검색용)
+        pinned_section_indices: 추천 질문 클릭 시 출처 섹션 인덱스 (BM25 스킵)
+                                None이면 BM25로 섹션 검색
     """
     logger.info("Q&A 시작 — 질문: %r", question[:50])
 
-    relevant_sections = _find_relevant_sections_bm25(question, summary)
-    relevant_chunks   = _find_relevant_chunks_bm25(question, raw_chunks or [])
+    # 추천 질문: 생성 시점에 고정된 섹션 인덱스 사용 → BM25 재검색 불필요
+    if pinned_section_indices is not None:
+        relevant_sections = [
+            summary.sections[i]
+            for i in pinned_section_indices
+            if 0 <= i < len(summary.sections)
+        ]
+        logger.debug("pinned 섹션 사용 %d개", len(relevant_sections))
+    else:
+        relevant_sections = _find_relevant_sections_bm25(question, summary)
+
+    relevant_chunks = _find_relevant_chunks_bm25(question, raw_chunks or [])
 
     if not relevant_sections and not relevant_chunks:
         logger.warning("관련 섹션/청크 없음 — 답변 불가")
@@ -242,7 +261,6 @@ def ask(
             logger.info("LLM 답변 불가 패턴 감지 — is_answerable=False 처리")
             return QAResult(answer=raw, sources=[], is_answerable=False)
 
-        # 답변 본문 기준으로 snippet 선택
         sources = _make_sources(raw, relevant_sections)
 
         logger.info("Q&A 완료 — 출처 섹션 %d개, 원문 청크 %d개", len(sources), len(relevant_chunks))
@@ -257,22 +275,25 @@ def ask(
         )
 
 
-def generate_follow_ups(summary: SummaryResult) -> list[str]:
+def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
     """
     섹션 bullets 기반으로 추천 질문 3개를 생성한다.
-    overall 대신 실제 섹션 내용을 사용해 LLM이 context에서
-    확실히 답 가능한 질문만 생성하도록 유도한다.
+    각 질문에 출처 섹션 인덱스(section_index)를 포함해 반환한다.
     """
-    defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
+    defaults = [
+        FollowUp("재무지표 더 자세히 보여줘", [0]),
+        FollowUp("리스크 요인은 무엇인가요?", [0]),
+        FollowUp("향후 전망은?", [0]),
+    ]
 
     if not summary.sections:
         return defaults
 
-    # 섹션 bullets 기반 context 구성 (최대 4개 섹션, 섹션당 3개 bullet)
+    # 섹션 bullets 기반 context 구성 (최대 4섹션 × 3 bullets)
     section_lines = []
-    for sec in summary.sections[:4]:
+    for i, sec in enumerate(summary.sections[:4]):
         bullets_text = "\n".join(f"- {b}" for b in sec.bullets[:3])
-        section_lines.append(f"[{sec.section}]\n{bullets_text}")
+        section_lines.append(f"[섹션 {i}] {sec.section}\n{bullets_text}")
     sections_context = "\n\n".join(section_lines)
 
     try:
@@ -287,7 +308,7 @@ def generate_follow_ups(summary: SummaryResult) -> list[str]:
                 )},
                 {"role": "user",   "content": user_prompt},
             ],
-            max_tokens=200,
+            max_tokens=300,
         )
 
         raw = raw.strip()
@@ -297,11 +318,23 @@ def generate_follow_ups(summary: SummaryResult) -> list[str]:
                 raw = raw[4:]
             raw = raw.strip()
 
-        data      = json.loads(raw)
-        questions = data.get("questions", [])
+        data  = json.loads(raw)
+        items = data.get("questions", [])
 
-        if len(questions) >= 3:
-            return questions[:3]
+        result = []
+        for item in items[:3]:
+            if isinstance(item, dict):
+                q   = item.get("q", "")
+                idx = item.get("section_index", 0)
+            else:
+                # 구버전 fallback: 문자열 리스트
+                q   = str(item)
+                idx = 0
+            if q:
+                result.append(FollowUp(question=q, section_indices=[idx]))
+
+        if len(result) >= 3:
+            return result
 
     except Exception as e:
         logger.warning("추천 질문 생성 실패: %s", e)
