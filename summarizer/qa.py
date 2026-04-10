@@ -22,6 +22,14 @@ MAX_SUMMARY_SECTIONS = 3
 MAX_RAW_CHUNKS       = 3
 CHUNK_BM25_MIN_SCORE = 0.1
 
+# 추천 질문 생성 컨텍스트에서 제거할 OCR 노이즈 패턴
+_OCR_NOISE_RE = re.compile(
+    r"\[OCR [^\]]*\]"          # [OCR 오인식 가능성] 등
+    r"|\[OCR\]"
+    r"|※ 이미지 기반 PDF[^\n]*"  # ※ 이미지 기반 PDF로 수치 정확도가 낮을 수 있습니다.
+    r"|원문:\s*[^\]]*"            # 원문: 2025.3.37 등
+)
+
 _UNANSWERABLE_PATTERNS = [
     "문서에서 해당 내용을 찾을 수 없",
     "문서에서 확인할 수 없",
@@ -32,6 +40,11 @@ _UNANSWERABLE_PATTERNS = [
 
 def _is_unanswerable(text: str) -> bool:
     return any(p in text for p in _UNANSWERABLE_PATTERNS)
+
+
+def _strip_ocr_noise(text: str) -> str:
+    """추천 질문 생성 전 OCR 노이즈 태그 제거."""
+    return _OCR_NOISE_RE.sub("", text).strip()
 
 
 class SourceItem:
@@ -194,8 +207,13 @@ def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
 
     section_lines = []
     for i, sec in enumerate(summary.sections[:4]):
-        bullets_text = "\n".join(f"- {b}" for b in sec.bullets[:3])
-        section_lines.append(f"[섹션 {i}] {sec.section}\n{bullets_text}")
+        # OCR 노이즈 제거 후 컨텍스트 구성
+        bullets_text = "\n".join(
+            f"- {_strip_ocr_noise(b)}" for b in sec.bullets[:3]
+            if _strip_ocr_noise(b)
+        )
+        section_title = _strip_ocr_noise(sec.section)
+        section_lines.append(f"[섹션 {i}] {section_title}\n{bullets_text}")
     sections_context = "\n\n".join(section_lines)
 
     try:
