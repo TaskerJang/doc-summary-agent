@@ -1,13 +1,18 @@
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
+from openai import OpenAI
 from rank_bm25 import BM25Okapi
 
 from summarizer.llm import SummaryResult, _call_api
 
 logger = logging.getLogger(__name__)
+
+_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+MODEL   = "gpt-5.2"
 
 PROMPTS_DIR           = Path(__file__).parent / "prompts"
 QA_PROMPT_PATH        = PROMPTS_DIR / "qa_v1.md"
@@ -257,7 +262,6 @@ def ask(
             max_tokens=500,
         )
 
-        # LLM이 "찾을 수 없음"으로 답한 경우 출처 없이 처리
         if _is_unanswerable(raw):
             logger.info("LLM 답변 불가 패턴 감지 — is_answerable=False 처리")
             return QAResult(answer=raw, sources=[], is_answerable=False)
@@ -279,8 +283,7 @@ def ask(
 def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
     """
     섹션 bullets 기반으로 추천 질문 3개를 생성한다.
-    각 질문에 출처 섹션 인덱스(section_index)를 포함해 반환한다.
-    default fallback은 전체 섹션을 커버하도록 section_indices를 넓게 설정.
+    response_format=json_object 사용으로 JSON 출력 안정성 보장.
     """
     n = len(summary.sections)
     all_idx = list(range(n)) if n else [0]
@@ -305,23 +308,20 @@ def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
         template    = FOLLOW_UP_PROMPT_PATH.read_text(encoding="utf-8")
         user_prompt = template.format(overall=sections_context)
 
-        raw = _call_api(
+        # response_format=json_object 사용 — GPT-5.2 reasoning 모델 JSON 출력 안정화
+        resp = _client.chat.completions.create(
+            model=MODEL,
             messages=[
                 {"role": "system", "content": (
                     "당신은 금융 문서 분석 전문가입니다. "
                     "제공된 섹션 내용에 근거해 독자가 실제로 물어볼 만한 구체적인 질문을 생성하세요."
                 )},
-                {"role": "user",   "content": user_prompt},
+                {"role": "user", "content": user_prompt},
             ],
-            max_tokens=300,
+            max_completion_tokens=300,
+            response_format={"type": "json_object"},
         )
-
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
+        raw = resp.choices[0].message.content or ""
 
         data  = json.loads(raw)
         items = data.get("questions", [])
@@ -332,13 +332,13 @@ def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
                 q   = item.get("q", "")
                 idx = item.get("section_index", 0)
             else:
-                # 구버전 fallback: 문자열 리스트
                 q   = str(item)
                 idx = 0
             if q:
                 result.append(FollowUp(question=q, section_indices=[idx]))
 
         if len(result) >= 3:
+            logger.info("추천 질문 생성 완료 — %d개", len(result))
             return result
 
     except Exception as e:
