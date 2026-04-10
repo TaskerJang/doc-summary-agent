@@ -18,10 +18,10 @@ PROMPTS_DIR           = Path(__file__).parent / "prompts"
 QA_PROMPT_PATH        = PROMPTS_DIR / "qa_v1.md"
 FOLLOW_UP_PROMPT_PATH = PROMPTS_DIR / "follow_up_v1.md"
 
-MAX_SUMMARY_SECTIONS  = 3
-MAX_RAW_CHUNKS        = 3
-CHUNK_BM25_MIN_SCORE  = 0.1
-SECTION_BM25_MIN_SCORE = 0.1   # 섹션도 최소 점수 필터 추가
+MAX_SUMMARY_SECTIONS   = 3
+MAX_RAW_CHUNKS         = 3
+CHUNK_BM25_MIN_SCORE   = 0.1
+SECTION_BM25_MIN_SCORE = 0.1
 
 # 추천 질문 생성 컨텍스트에서 제거할 OCR 노이즈 패턴
 _OCR_NOISE_RE = re.compile(
@@ -38,6 +38,14 @@ _UNANSWERABLE_PATTERNS = [
     "해당 정보는 문서에 포함되어 있지 않",
 ]
 
+_QA_SYSTEM_PROMPT = (
+    "당신은 금융 문서 내용을 기반으로 질문에 답변하는 전문 AI입니다. "
+    "제공된 문서 내용에만 근거하여 답변하세요. "
+    "원문 발췌 > 요약 섹션 > 전체 요약 순으로 우선 참조하세요. "
+    "전체 요약에 답이 있으면 반드시 그 내용을 바탕으로 답변하세요. "
+    "문서에 없는 내용은 절대 생성하지 마세요."
+)
+
 
 def _is_unanswerable(text: str) -> bool:
     return any(p in text for p in _UNANSWERABLE_PATTERNS)
@@ -46,6 +54,16 @@ def _is_unanswerable(text: str) -> bool:
 def _strip_ocr_noise(text: str) -> str:
     """추천 질문 생성 전 OCR 노이즈 태그 제거."""
     return _OCR_NOISE_RE.sub("", text).strip()
+
+
+def _call_qa(user_prompt: str) -> str:
+    return _call_api(
+        messages=[
+            {"role": "system", "content": _QA_SYSTEM_PROMPT},
+            {"role": "user",   "content": user_prompt},
+        ],
+        max_tokens=500,
+    )
 
 
 class SourceItem:
@@ -101,7 +119,6 @@ def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     bm25   = BM25Okapi(list(tokenized_valid))
     scores = bm25.get_scores(tokenized_query)
     ranked = sorted(zip(scores, sections_valid), key=lambda x: x[0], reverse=True)
-    # 섹션도 최소 점수 필터 적용
     return [sec for score, sec in ranked[:MAX_SUMMARY_SECTIONS] if score >= SECTION_BM25_MIN_SCORE]
 
 
@@ -124,18 +141,19 @@ def _build_context(
     relevant_sections: list,
     relevant_chunks: list[str],
     overall: str = "",
+    force_overall: bool = False,
 ) -> str:
     parts = []
-    if relevant_chunks:
-        parts.append("## 원문 발췌")
-        for i, chunk in enumerate(relevant_chunks, 1):
-            parts.append(f"[원문 {i}]\n{chunk}")
-    if relevant_sections:
-        parts.append("## 요약 섹션")
-        for sec in relevant_sections:
-            parts.append(f"[{sec.section}]\n" + "\n".join(f"- {b}" for b in sec.bullets))
-    # BM25 매칭 없으면 전체 요약 fallback
-    if not relevant_sections and not relevant_chunks and overall:
+    if not force_overall:
+        if relevant_chunks:
+            parts.append("## 원문 발췌")
+            for i, chunk in enumerate(relevant_chunks, 1):
+                parts.append(f"[원문 {i}]\n{chunk}")
+        if relevant_sections:
+            parts.append("## 요약 섹션")
+            for sec in relevant_sections:
+                parts.append(f"[{sec.section}]\n" + "\n".join(f"- {b}" for b in sec.bullets))
+    if (force_overall or (not relevant_sections and not relevant_chunks)) and overall:
         parts.append("## 전체 요약")
         parts.append(overall[:3000])
     return "\n\n".join(parts)
@@ -173,36 +191,38 @@ def ask(
 
     relevant_chunks = _find_relevant_chunks_bm25(question, raw_chunks or [])
 
-    use_overall_fallback = not relevant_sections and not relevant_chunks
-    if use_overall_fallback:
-        if not summary.overall:
-            logger.warning("BM25 매칭 없음 + overall 없음 — 답변 불가")
-            return QAResult(answer="문서에서 해당 내용을 찾을 수 없습니다.", sources=[], is_answerable=False)
-        logger.info("BM25 매칭 없음 — overall fallback 사용")
-
-    context = _build_context(relevant_sections, relevant_chunks, overall=summary.overall)
-    template    = QA_PROMPT_PATH.read_text(encoding="utf-8")
-    user_prompt = template.format(question=question, context=context)
+    template = QA_PROMPT_PATH.read_text(encoding="utf-8")
 
     try:
-        raw = _call_api(
-            messages=[
-                {"role": "system", "content": (
-                    "당신은 금융 문서 내용을 기반으로 질문에 답변하는 전문 AI입니다. "
-                    "제공된 문서 내용에만 근거하여 답변하세요. "
-                    "원문 발췌 > 요약 섹션 > 전체 요약 순으로 우선 참조하세요. "
-                    "전체 요약에 답이 있으면 반드시 그 내용을 바탕으로 답변하세요. "
-                    "문서에 없는 내용은 절대 생성하지 마세요."
-                )},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=500,
-        )
+        # 1차 시도: BM25 섹션/청크 기반
+        if relevant_sections or relevant_chunks:
+            context     = _build_context(relevant_sections, relevant_chunks)
+            user_prompt = template.format(question=question, context=context)
+            raw = _call_qa(user_prompt)
+
+            if not _is_unanswerable(raw):
+                sources = _make_sources(raw, relevant_sections)
+                logger.info("Q&A 완료 — 출처 %d개", len(sources))
+                return QAResult(answer=raw, sources=sources, is_answerable=True)
+
+            logger.info("BM25 섹션 답변 불가 — overall fallback 시도")
+
+        # 2차 시도: overall fallback
+        if not summary.overall:
+            logger.warning("overall 없음 — 답변 불가")
+            return QAResult(answer="문서에서 해당 내용을 찾을 수 없습니다.", sources=[], is_answerable=False)
+
+        logger.info("overall fallback 사용")
+        context     = _build_context([], [], overall=summary.overall, force_overall=True)
+        user_prompt = template.format(question=question, context=context)
+        raw = _call_qa(user_prompt)
+
         if _is_unanswerable(raw):
             return QAResult(answer=raw, sources=[], is_answerable=False)
-        sources = _make_sources(raw, relevant_sections)
-        logger.info("Q&A 완료 — 출처 %d개", len(sources))
-        return QAResult(answer=raw, sources=sources, is_answerable=True)
+
+        logger.info("Q&A 완료 (overall fallback) — 출처 0개")
+        return QAResult(answer=raw, sources=[], is_answerable=True)
+
     except Exception as e:
         logger.error("Q&A 생성 실패: %s", e)
         return QAResult(answer="[답변 생성 실패]", sources=[], is_answerable=False)
