@@ -24,10 +24,10 @@ CHUNK_BM25_MIN_SCORE = 0.1
 
 # 추천 질문 생성 컨텍스트에서 제거할 OCR 노이즈 패턴
 _OCR_NOISE_RE = re.compile(
-    r"\[OCR [^\]]*\]"          # [OCR 오인식 가능성] 등
+    r"\[OCR [^\]]*\]"
     r"|\[OCR\]"
-    r"|※ 이미지 기반 PDF[^\n]*"  # ※ 이미지 기반 PDF로 수치 정확도가 낮을 수 있습니다.
-    r"|원문:\s*[^\]]*"            # 원문: 2025.3.37 등
+    r"|※ 이미지 기반 PDF[^\n]*"
+    r"|원문:\s*[^\]]*"
 )
 
 _UNANSWERABLE_PATTERNS = [
@@ -202,30 +202,24 @@ def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
         FollowUp("리스크 요인은 무엇인가요?", all_idx),
         FollowUp("향후 전망은?", all_idx),
     ]
-    if not summary.sections:
+    if not summary.overall:
         return defaults
 
-    section_lines = []
-    for i, sec in enumerate(summary.sections[:4]):
-        # OCR 노이즈 제거 후 컨텍스트 구성
-        bullets_text = "\n".join(
-            f"- {_strip_ocr_noise(b)}" for b in sec.bullets[:3]
-            if _strip_ocr_noise(b)
-        )
-        section_title = _strip_ocr_noise(sec.section)
-        section_lines.append(f"[섹션 {i}] {section_title}\n{bullets_text}")
-    sections_context = "\n\n".join(section_lines)
+    # overall(전체 요약)을 컨텍스트로 사용 — 섹션별 요약보다 LLM이 정제한 텍스트라 OCR 노이즈 적음
+    overall_context = _strip_ocr_noise(summary.overall)
+    if not overall_context.strip():
+        return defaults
 
     try:
         template    = FOLLOW_UP_PROMPT_PATH.read_text(encoding="utf-8")
-        user_prompt = template.format(overall=sections_context)
+        user_prompt = template.format(overall=overall_context)
 
         resp = _client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": (
                     "당신은 금융 문서 분석 전문가입니다. "
-                    "제공된 섹션 내용에 근거해 독자가 실제로 물어볼 만한 구체적인 질문을 생성하세요."
+                    "제공된 문서 요약에 근거해 독자가 실제로 물어볼 만한 구체적인 질문을 생성하세요."
                 )},
                 {"role": "user", "content": user_prompt},
             ],
