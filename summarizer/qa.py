@@ -118,7 +118,11 @@ def _find_relevant_chunks_bm25(question: str, raw_chunks: list[str]) -> list[str
     return [chunk for score, chunk in ranked[:MAX_RAW_CHUNKS] if score >= CHUNK_BM25_MIN_SCORE]
 
 
-def _build_context(relevant_sections: list, relevant_chunks: list[str]) -> str:
+def _build_context(
+    relevant_sections: list,
+    relevant_chunks: list[str],
+    overall: str = "",
+) -> str:
     parts = []
     if relevant_chunks:
         parts.append("## 원문 발췌")
@@ -128,6 +132,10 @@ def _build_context(relevant_sections: list, relevant_chunks: list[str]) -> str:
         parts.append("## 요약 섹션")
         for sec in relevant_sections:
             parts.append(f"[{sec.section}]\n" + "\n".join(f"- {b}" for b in sec.bullets))
+    # BM25 매칭이 없을 때 전체 요약으로 fallback
+    if not relevant_sections and not relevant_chunks and overall:
+        parts.append("## 전체 요약")
+        parts.append(overall[:3000])
     return "\n\n".join(parts)
 
 
@@ -163,11 +171,15 @@ def ask(
 
     relevant_chunks = _find_relevant_chunks_bm25(question, raw_chunks or [])
 
-    if not relevant_sections and not relevant_chunks:
+    # BM25 매칭 없고 overall도 없으면 답변 불가
+    if not relevant_sections and not relevant_chunks and not summary.overall:
         logger.warning("관련 섹션/청크 없음 — 답변 불가")
         return QAResult(answer="문서에서 해당 내용을 찾을 수 없습니다.", sources=[], is_answerable=False)
 
-    context     = _build_context(relevant_sections, relevant_chunks)
+    context = _build_context(relevant_sections, relevant_chunks, overall=summary.overall)
+    if not relevant_sections and not relevant_chunks:
+        logger.info("BM25 매칭 없음 — overall fallback 사용")
+
     template    = QA_PROMPT_PATH.read_text(encoding="utf-8")
     user_prompt = template.format(question=question, context=context)
 
@@ -205,7 +217,7 @@ def generate_follow_ups(summary: SummaryResult) -> list[FollowUp]:
     if not summary.overall:
         return defaults
 
-    # overall(전체 요약)을 컨텍스트로 사용 — 섹션별 요약보다 LLM이 정제한 텍스트라 OCR 노이즈 적음
+    # overall(전체 요약)을 컨텍스트로 사용 — OCR 노이즈 적음
     overall_context = _strip_ocr_noise(summary.overall)
     if not overall_context.strip():
         return defaults
