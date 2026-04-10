@@ -17,9 +17,10 @@ SKIP_SECTION_KEYWORDS: frozenset[str] = frozenset({
     "보도출처",
 })
 
-# C-04, C-05: 기본값 — Step 3 요약 결과 확인 후 조정 예정
+# C-04, C-05: eval 결과 반영 — chunk_size=500 / chunk_overlap=100 채택
+# (6개 조합 비교 기준 Faithfulness 최고: 30/40, 75.0%)
 DEFAULT_CHUNK_SIZE = 500
-DEFAULT_CHUNK_OVERLAP = 50
+DEFAULT_CHUNK_OVERLAP = 100
 DEFAULT_MIN_CHUNK_SIZE = 50
 
 # 표 판단 기준 비율 — 실제 문서 테스트 후 조정 예정
@@ -47,9 +48,9 @@ def chunk(
 
     Args:
         text: preprocessor.clean() 결과 텍스트
-        chunk_size: 청크 최대 글자 수 (C-05: Step 3 요약 결과 후 조정 예정)
-        chunk_overlap: 청크 간 오버랩 글자 수 (C-05: Step 3 후 조정 예정)
-        min_chunk_size: 이 값 미만인 청크는 건너뜀 (C-04: Step 3 후 조정 예정)
+        chunk_size: 청크 최대 글자 수
+        chunk_overlap: 청크 간 오버랩 글자 수
+        min_chunk_size: 이 값 미만인 청크는 건너뜀
 
     Returns:
         list[Chunk]: section, page, chunk_index, text 필드를 가진 청크 배열
