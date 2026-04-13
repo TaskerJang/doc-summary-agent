@@ -43,6 +43,17 @@ class SummaryResult(BaseModel):
     is_image_based: bool
 
 
+# ── 청크 수 → 불릿 수 결정 ────────────────────────────────
+def _resolve_bullet_count(chunk_count: int) -> int:
+    """청크 수에 따라 overall 요약의 불릿 수를 동적으로 결정한다."""
+    if chunk_count <= 10:
+        return 5
+    elif chunk_count <= 25:
+        return 8
+    else:
+        return 12
+
+
 # ── 프롬프트 로드 ──────────────────────────────────────────
 def _load_system_prompt(is_image_based: bool) -> str:
     base = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
@@ -117,15 +128,23 @@ def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | None:
 
 
 # ── Reduce 단계: 섹션 요약 → 전체 요약 ────────────────────
-def _summarize_overall(sections: list[SectionSummary], system_prompt: str) -> str:
+def _summarize_overall(
+    sections: list[SectionSummary],
+    system_prompt: str,
+    chunk_count: int,
+) -> str:
     sections_text = "\n".join(
         f"[{s.section}]\n" + "\n".join(f"- {b}" for b in s.bullets)
         for s in sections
     )
     sections_text = re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1에서 \2', sections_text)
 
+    bullet_count = _resolve_bullet_count(chunk_count)
     template    = OVERALL_PROMPT_PATH.read_text(encoding="utf-8")
-    user_prompt = template.format(sections_text=sections_text)
+    user_prompt = template.format(
+        sections_text=sections_text,
+        bullet_count=bullet_count,
+    )
 
     try:
         result = _call_api(
@@ -155,7 +174,8 @@ def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult
     청크 배열을 받아 전체 요약 및 섹션별 요약을 반환한다.
     청크 요약은 ThreadPoolExecutor로 병렬 처리한다.
     """
-    logger.info("요약 시작 — 청크 %d개  is_image_based=%s", len(chunks), is_image_based)
+    chunk_count = len(chunks)
+    logger.info("요약 시작 — 청크 %d개  is_image_based=%s", chunk_count, is_image_based)
 
     system_prompt = _load_system_prompt(is_image_based)
 
@@ -177,10 +197,10 @@ def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult
             is_image_based=is_image_based,
         )
 
-    # Reduce: 전체 핵심 요약
-    overall = _summarize_overall(sections, system_prompt)
+    # Reduce: 전체 핵심 요약 (청크 수 기반 불릿 수 동적 결정)
+    overall = _summarize_overall(sections, system_prompt, chunk_count)
 
-    logger.info("요약 완료 — 섹션 %d개", len(sections))
+    logger.info("요약 완료 — 섹션 %d개  불릿 수 기준 %d개", len(sections), _resolve_bullet_count(chunk_count))
     return SummaryResult(
         overall=overall,
         sections=sections,
