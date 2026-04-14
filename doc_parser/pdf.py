@@ -1,9 +1,11 @@
+import re
 from pathlib import Path
 
 from doc_parser.ocr_cache import extract_text_with_cache, extract_page_with_cache
 
-# pymupdf4llm이 이미지를 생략할 때 삽입하는 마커
+# pymupdf4llm이 이미지를 생략할 때 삽입하는 마커 패턴
 _OMITTED_MARKER = "intentionally omitted"
+_OMITTED_RE = re.compile(r"==> picture \[.*?\] intentionally omitted <==")
 
 
 def is_image_based_pdf(pdf_path: Path) -> bool:
@@ -94,7 +96,8 @@ def _parse_pymupdf4llm(pdf_path: Path) -> str:
     """
     페이지별 3단계 처리:
       1) get_text() 있음  → pymupdf4llm Markdown 변환
-         1-1) 변환 결과에 이미지 마커 있음 → EasyOCR로 이미지 영역 텍스트 보강
+         1-1) 변환 결과에 이미지 마커 있음
+              → EasyOCR로 OCR 후 'intentionally omitted' 마커 자리에 직접 치환
       2) get_text() 없음  → pdfplumber fallback
       3) pdfplumber도 빈 값 → EasyOCR 페이지 단위 OCR
     """
@@ -131,16 +134,16 @@ def _parse_pymupdf4llm(pdf_path: Path) -> str:
         if fb_text.strip():
             pdfplumber_result[i] = fb_text
 
-    # 원래 페이지 순서대로 병합 + 이미지 임베딩 페이지 EasyOCR 보강
+    # 원래 페이지 순서대로 병합 + 이미지 임베딩 페이지 EasyOCR 치환
     page_texts: list[str] = []
     for i in range(len(doc)):
         if i in pymupdf_result and pymupdf_result[i].strip():
             content = pymupdf_result[i]
-            # 이미지 마커가 있으면 EasyOCR로 해당 페이지 추가 추출 후 append
+            # intentionally omitted 마커를 EasyOCR 결과로 직접 치환
             if _has_embedded_images(content):
                 ocr_text = extract_page_with_cache(pdf_path, i)
                 if ocr_text.strip():
-                    content = content + "\n\n<!-- OCR --\n" + ocr_text + "\n-->"
+                    content = _OMITTED_RE.sub(ocr_text, content)
             page_texts.append(content)
         elif i in pdfplumber_result:
             page_texts.append(pdfplumber_result[i])
