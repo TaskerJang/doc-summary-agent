@@ -14,7 +14,7 @@ from summarizer.llm import SummaryResult, SectionSummary
 from summarizer.qa import ask, generate_follow_ups
 
 
-# ── 헬퍼: result dict → SummaryResult 복원 ────────────────
+# ── 헬퍼: result dict → SummaryResult 복원 ────────────────────────
 def _to_summary_result(result: dict) -> SummaryResult | None:
     summary_dict = result.get("summary")
     if not summary_dict:
@@ -27,13 +27,13 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
     )
 
 
-# ── 헬퍼: result dict → raw_chunks 텍스트 리스트 추출 ─────
+# ── 헬퍼: result dict → raw_chunks 텍스트 리스트 추출 ─────────────
 def _to_raw_chunks(result: dict) -> list[str]:
     chunks = result.get("chunks", [])
     return [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
 
 
-# ── 헬퍼: 섹션명 정제 (## ** 제거, no section 대체) ───────
+# ── 헬퍼: 섹션명 정제 (## ** 제거, no section 대체) ─────────────
 def _clean(name: str) -> str:
     name = re.sub(r"^#+\s*", "", name)
     name = re.sub(r"\*+", "", name)
@@ -43,19 +43,19 @@ def _clean(name: str) -> str:
     return name
 
 
-# ── 헬퍼: ~~ 취소선 방지 ──────────────────────────────────
+# ── 헬퍼: ~~ 취소선 방지 ──────────────────────────────
 def _fix_tilde(text: str) -> str:
     return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
 
 
-# ── 헬퍼: None 메타값 표시용 ──────────────────────────────
+# ── 헬퍼: None 메타값 표시용 ─────────────────────────────
 def _fmt(value, suffix: str = "") -> str:
     if value is None:
         return "-"
     return f"{value}{suffix}"
 
 
-# ── 추천 질문 생성 (LLM 기반) ─────────────────────────────
+# ── 추천 질문 생성 (LLM 기반) ────────────────────────────
 def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     if not summary:
         defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
@@ -105,17 +105,18 @@ async def _send_qa_answer(qa_result) -> None:
     await msg.update()
 
 
-# ── 세션 시작 ──────────────────────────────────────────────
+# ── 세션 시작 ──────────────────────────────────────────────────
 @cl.on_chat_start
 async def on_chat_start():
-    cl.user_session.set("result", None)
+    cl.user_session.set("result",     None)
     cl.user_session.set("raw_chunks", [])
+    cl.user_session.set("doc_id",     None)
     await cl.Message(
-        content="안녕하세요! 📄 아래 **파일 업로드 버튼**으로 문서를 업로드해 주세요.\n\nPDF · DOCX · HWP · DOC 형식을 지원합니다."
+        content="안녕하세요! 📔 아래 **파일 업로드 버튼**으로 문서를 업로드해 주세요.\n\nPDF · DOCX · HWP · DOC 형식을 지원합니다."
     ).send()
 
 
-# ── 파일 업로드 + Q&A 처리 ────────────────────────────────
+# ── 파일 업로드 + Q&A 처리 ─────────────────────────────────
 @cl.on_message
 async def on_message(message: cl.Message):
 
@@ -123,7 +124,7 @@ async def on_message(message: cl.Message):
     if message.elements:
         file     = message.elements[0]
         filename = file.name
-        suffix = Path(filename).suffix
+        suffix   = Path(filename).suffix
         tmp_path = Path(file.path)
 
         if tmp_path.suffix.lower() != suffix.lower() and suffix:
@@ -131,20 +132,25 @@ async def on_message(message: cl.Message):
             tmp_path.rename(new_path)
             tmp_path = new_path
 
+        # doc_id = 파일명 (벡터 DB 콜렉션 키)
+        doc_id = filename
+
         # ── TaskList 초기화 ────────────────────────────────
         task_list = cl.TaskList()
         task_list.status = "분석 중..."
 
-        task1 = cl.Task(title="Step 1 · 파싱", status=cl.TaskStatus.RUNNING)
-        task2 = cl.Task(title="Step 2 · 청킹", status=cl.TaskStatus.READY)
-        task3 = cl.Task(title="Step 3 · 요약 생성", status=cl.TaskStatus.READY)
+        task1 = cl.Task(title="Step 1 · 파싱",           status=cl.TaskStatus.RUNNING)
+        task2 = cl.Task(title="Step 2 · 청킹",           status=cl.TaskStatus.READY)
+        task3 = cl.Task(title="Step 3 · 요약 생성",       status=cl.TaskStatus.READY)
+        task4 = cl.Task(title="Step 4 · 벡터 인덱스 생성", status=cl.TaskStatus.READY)
 
         await task_list.add_task(task1)
         await task_list.add_task(task2)
         await task_list.add_task(task3)
+        await task_list.add_task(task4)
         await task_list.send()
 
-        # ── Step 1 ────────────────────────────────────────
+        # ── Step 1 ─────────────────────────────────────
         step1 = await asyncio.to_thread(run_step1, tmp_path)
 
         if step1.get("status") == "error":
@@ -165,7 +171,7 @@ async def on_message(message: cl.Message):
         task2.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # ── Step 2 ────────────────────────────────────────
+        # ── Step 2 ─────────────────────────────────────
         step2 = await asyncio.to_thread(run_step2, step1)
 
         if step2.get("status") == "error":
@@ -181,7 +187,7 @@ async def on_message(message: cl.Message):
         task3.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # ── Step 3 ────────────────────────────────────────
+        # ── Step 3 ─────────────────────────────────────
         step3 = await asyncio.to_thread(run_step3, step2)
 
         summary_dict  = step3.get("summary", {})
@@ -190,17 +196,33 @@ async def on_message(message: cl.Message):
         if step3.get("status") == "partial":
             task3.status = cl.TaskStatus.FAILED
             task3.title  = "Step 3 · 요약 실패"
-            task_list.status = "부분 완료"
         else:
             task3.status = cl.TaskStatus.DONE
             task3.title  = f"Step 3 · 요약 완료 — {section_count}개 섹션"
-            task_list.status = "완료 ✓"
 
+        task4.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # ── 결과 저장 (raw_chunks 포함) ───────────────────
-        cl.user_session.set("result", step3)
-        cl.user_session.set("raw_chunks", _to_raw_chunks(step3))
+        # ── Step 4: 벡터 인덱스 생성 (Qdrant) ─────────────────
+        raw_chunks = _to_raw_chunks(step3)
+        try:
+            from summarizer.embedder import index_chunks
+            await asyncio.to_thread(index_chunks, raw_chunks, doc_id)
+            task4.status = cl.TaskStatus.DONE
+            task4.title  = f"Step 4 · 벡터 인덱스 완료 — {len(raw_chunks)}청크"
+        except Exception as e:
+            task4.status = cl.TaskStatus.FAILED
+            task4.title  = f"Step 4 · 벡터 인덱스 실패 (단순 BM25 사용)"
+            doc_id = None  # 인덱스 실패 시 BM25 fallback
+
+        if step3.get("status") != "partial":
+            task_list.status = "완료 ✓"
+        await task_list.send()
+
+        # ── 결과 저장 ────────────────────────────────────
+        cl.user_session.set("result",     step3)
+        cl.user_session.set("raw_chunks", raw_chunks)
+        cl.user_session.set("doc_id",     doc_id)
         summary = _to_summary_result(step3)
 
         # ── 전체 요약 스트리밍 ─────────────────────────────
@@ -208,7 +230,7 @@ async def on_message(message: cl.Message):
             overall = _fix_tilde(summary.overall)
             msg     = cl.Message(content="")
             await msg.send()
-            await msg.stream_token("📄 **전체 요약**\n\n")
+            await msg.stream_token("📔 **전체 요약**\n\n")
             for ch in overall:
                 await msg.stream_token(ch)
             await msg.update()
@@ -230,7 +252,7 @@ async def on_message(message: cl.Message):
                 elements=elements,
             ).send()
 
-        # ── 추천 질문 ──────────────────────────────────────
+        # ── 추천 질문 ────────────────────────────────────
         actions = _build_follow_ups(summary)
         await cl.Message(
             content="💬 **이런 것도 물어보세요**",
@@ -252,16 +274,18 @@ async def on_message(message: cl.Message):
 
     question   = message.content
     raw_chunks = cl.user_session.get("raw_chunks") or []
-    qa_result  = await asyncio.to_thread(ask, question, summary, raw_chunks)
+    doc_id     = cl.user_session.get("doc_id")
+    qa_result  = await asyncio.to_thread(ask, question, summary, raw_chunks, None, doc_id)
     await _send_qa_answer(qa_result)
 
 
-# ── 추천 질문 버튼 클릭 ────────────────────────────────────
+# ── 추천 질문 버튼 클릭 ──────────────────────────────────
 @cl.action_callback("followup")
 async def on_followup(action: cl.Action):
     question   = action.payload["value"]
     result     = cl.user_session.get("result")
     raw_chunks = cl.user_session.get("raw_chunks") or []
+    doc_id     = cl.user_session.get("doc_id")
     summary    = _to_summary_result(result)
 
     if not summary:
@@ -269,9 +293,5 @@ async def on_followup(action: cl.Action):
         return
 
     await cl.Message(content=question, author="user").send()
-
-    # section_indices 없이 BM25 + overall fallback 흐름 타도록 None 전달
-    qa_result = await asyncio.to_thread(
-        ask, question, summary, raw_chunks, None
-    )
+    qa_result = await asyncio.to_thread(ask, question, summary, raw_chunks, None, doc_id)
     await _send_qa_answer(qa_result)
