@@ -19,12 +19,12 @@ QA_PROMPT_PATH        = PROMPTS_DIR / "qa_v1.md"
 FOLLOW_UP_PROMPT_PATH = PROMPTS_DIR / "follow_up_v1.md"
 
 MAX_SUMMARY_SECTIONS   = 3
-MAX_RAW_CHUNKS         = 5   # 하이브리드 결과 반영 위해 3→5
+MAX_RAW_CHUNKS         = 5    # RRF 퓨전 후보
+RERANK_TOP_N           = 3    # reranker 최종 반환 수
 CHUNK_BM25_MIN_SCORE   = 0.1
 SECTION_BM25_MIN_SCORE = 0.1
-RRF_K                  = 60   # RRF 상수
+RRF_K                  = 60
 
-# 추천 질문 생성 컨텍스트에서 제거할 OCR 노이즈 패턴
 _OCR_NOISE_RE = re.compile(
     r"\[OCR [^\]]*\]"
     r"|\[OCR\]"
@@ -47,13 +47,55 @@ _QA_SYSTEM_PROMPT = (
     "문서에 없는 내용은 절대 생성하지 마세요."
 )
 
+# ── reranker 싱글턴 ─────────────────────────────────────────────────────────
+_reranker = None
+
+def _get_reranker():
+    """
+    bge-reranker-v2-m3 싱글턴.
+    cross-encoder 방식으로 (질문, 청크) 쌍의 관련도를 0~1 스코어로 반환.
+    미설치 또는 로드 실패 시 None 반환 → reranking 스킵.
+    """
+    global _reranker
+    if _reranker is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            logger.info("bge-reranker-v2-m3 로딩 중...")
+            _reranker = CrossEncoder("BAAI/bge-reranker-v2-m3", max_length=512)
+            logger.info("bge-reranker-v2-m3 로딩 완료")
+        except Exception as e:
+            logger.warning("reranker 로드 실패 — reranking 스킵: %s", e)
+            _reranker = False  # 재시도 방지용 sentinel
+    return _reranker if _reranker else None
+
+
+def _rerank(question: str, chunks: list[str], top_n: int = RERANK_TOP_N) -> list[str]:
+    """
+    bge-reranker-v2-m3로 (질문, 청크) 쌍 관련도 스코어링 후 top_n 반환.
+    reranker 없거나 청크 수가 top_n 이하면 그대로 반환.
+    """
+    if len(chunks) <= top_n:
+        return chunks
+    reranker = _get_reranker()
+    if reranker is None:
+        return chunks[:top_n]
+    try:
+        pairs  = [(question, c) for c in chunks]
+        scores = reranker.predict(pairs)
+        ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
+        result = [c for _, c in ranked[:top_n]]
+        logger.info("Reranking 완료 — %d → %d청크", len(chunks), len(result))
+        return result
+    except Exception as e:
+        logger.warning("Reranking 실패 — 원본 순서 유지: %s", e)
+        return chunks[:top_n]
+
 
 def _is_unanswerable(text: str) -> bool:
     return any(p in text for p in _UNANSWERABLE_PATTERNS)
 
 
 def _strip_ocr_noise(text: str) -> str:
-    """추천 질문 생성 전 OCR 노이즈 태그 제거."""
     return _OCR_NOISE_RE.sub("", text).strip()
 
 
@@ -116,11 +158,8 @@ def _rrf_fusion(
     """
     Reciprocal Rank Fusion:
     score(d) = 1/(k + rank_bm25) + 1/(k + rank_dense)
-
-    두 결과를 퓨전해 최종 Top-N 청크 반환.
-    한쪽 결과에만 있는 청크는 다른 쪽 rank를 len+1로 처리.
     """
-    all_chunks = list(dict.fromkeys(bm25_chunks + dense_chunks))  # 순서 유지 중복 제거
+    all_chunks = list(dict.fromkeys(bm25_chunks + dense_chunks))
     scores: dict[str, float] = {c: 0.0 for c in all_chunks}
 
     for rank, chunk in enumerate(bm25_chunks, start=1):
@@ -138,17 +177,17 @@ def _find_relevant_chunks_hybrid(
     doc_id: str | None = None,
 ) -> list[str]:
     """
-    하이브리드 검색:
-      1) BM25 sparse 검색
-      2) Dense 검색 (Qdrant, doc_id 있을 때만)
-      3) RRF 퓨전
+    하이브리드 검색 파이프라인:
+      1) BM25 sparse 검색        → Top-5 청크
+      2) Dense 검색 (Qdrant)     → Top-5 청크
+      3) RRF 퓨전                → Top-5 청크
+      4) bge-reranker-v2-m3     → Top-3 청크 (최종 LLM 컨텍스트)
 
-    doc_id 없거나 Qdrant 미연결 시 BM25 단독으로 fallback.
+    doc_id 없거나 Qdrant 미연결 시 BM25 → reranker fallback.
+    reranker 미설치 시 RRF 결과 그대로 반환.
     """
-    # BM25
     bm25_chunks = _find_relevant_chunks_bm25(question, raw_chunks)
 
-    # Dense (선택적)
     dense_chunks: list[str] = []
     if doc_id:
         try:
@@ -157,13 +196,15 @@ def _find_relevant_chunks_hybrid(
         except Exception as e:
             logger.warning("Dense 검색 실패 — BM25 단독 사용: %s", e)
 
-    if not dense_chunks:
-        return bm25_chunks
+    if dense_chunks:
+        fused = _rrf_fusion(bm25_chunks, dense_chunks)
+        logger.info("RRF 퓨전 완료 — bm25:%d dense:%d → fused:%d",
+                    len(bm25_chunks), len(dense_chunks), len(fused))
+    else:
+        fused = bm25_chunks
 
-    fused = _rrf_fusion(bm25_chunks, dense_chunks)
-    logger.info("RRF 퓨전 완료 — bm25:%d dense:%d → fused:%d",
-                len(bm25_chunks), len(dense_chunks), len(fused))
-    return fused
+    # reranker로 최종 정밀도 향상
+    return _rerank(question, fused, top_n=RERANK_TOP_N)
 
 
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
@@ -242,8 +283,8 @@ def ask(
     """
     Q&A 메인 함수.
 
-    doc_id 제공 시 BM25 + Dense(Qdrant) 하이브리드 검색 + RRF 퓨전 사용.
-    doc_id 없으면 기존 BM25 단독 동작 (하위 호환).
+    검색 파이프라인: BM25 + Dense(Qdrant) → RRF → bge-reranker-v2-m3 → LLM
+    doc_id 없으면 BM25 단독 (하위 호환).
     """
     logger.info("Q&A 시작 — 질문: %r (doc_id=%s)", question[:50], doc_id)
 
@@ -256,7 +297,6 @@ def ask(
     else:
         relevant_sections = _find_relevant_sections_bm25(question, summary)
 
-    # 하이브리드 청크 검색 (doc_id 있으면 RRF, 없으면 BM25)
     relevant_chunks = _find_relevant_chunks_hybrid(question, raw_chunks or [], doc_id=doc_id)
 
     template = QA_PROMPT_PATH.read_text(encoding="utf-8")
@@ -272,7 +312,7 @@ def ask(
                 logger.info("Q&A 완료 — 출처 %d개", len(sources))
                 return QAResult(answer=raw, sources=sources, is_answerable=True)
 
-            logger.info("하이브리드 검색 답변 불가 — overall fallback 시도")
+            logger.info("검색 결과 답변 불가 — overall fallback 시도")
 
         if not summary.overall:
             logger.warning("overall 없음 — 답변 불가")
