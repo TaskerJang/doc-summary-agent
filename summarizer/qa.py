@@ -19,9 +19,10 @@ QA_PROMPT_PATH        = PROMPTS_DIR / "qa_v1.md"
 FOLLOW_UP_PROMPT_PATH = PROMPTS_DIR / "follow_up_v1.md"
 
 MAX_SUMMARY_SECTIONS   = 3
-MAX_RAW_CHUNKS         = 3
+MAX_RAW_CHUNKS         = 5   # 하이브리드 결과 반영 위해 3→5
 CHUNK_BM25_MIN_SCORE   = 0.1
 SECTION_BM25_MIN_SCORE = 0.1
+RRF_K                  = 60   # RRF 상수
 
 # 추천 질문 생성 컨텍스트에서 제거할 OCR 노이즈 패턴
 _OCR_NOISE_RE = re.compile(
@@ -106,6 +107,65 @@ def _best_bullet_by_answer(answer: str, bullets: list[str]) -> str:
     return scored[0][1] if scored[0][0] > 0 else bullets[0]
 
 
+def _rrf_fusion(
+    bm25_chunks: list[str],
+    dense_chunks: list[str],
+    k: int = RRF_K,
+    top_n: int = MAX_RAW_CHUNKS,
+) -> list[str]:
+    """
+    Reciprocal Rank Fusion:
+    score(d) = 1/(k + rank_bm25) + 1/(k + rank_dense)
+
+    두 결과를 퓨전해 최종 Top-N 청크 반환.
+    한쪽 결과에만 있는 청크는 다른 쪽 rank를 len+1로 처리.
+    """
+    all_chunks = list(dict.fromkeys(bm25_chunks + dense_chunks))  # 순서 유지 중복 제거
+    scores: dict[str, float] = {c: 0.0 for c in all_chunks}
+
+    for rank, chunk in enumerate(bm25_chunks, start=1):
+        scores[chunk] += 1.0 / (k + rank)
+    for rank, chunk in enumerate(dense_chunks, start=1):
+        scores[chunk] += 1.0 / (k + rank)
+
+    ranked = sorted(all_chunks, key=lambda c: scores[c], reverse=True)
+    return ranked[:top_n]
+
+
+def _find_relevant_chunks_hybrid(
+    question: str,
+    raw_chunks: list[str],
+    doc_id: str | None = None,
+) -> list[str]:
+    """
+    하이브리드 검색:
+      1) BM25 sparse 검색
+      2) Dense 검색 (Qdrant, doc_id 있을 때만)
+      3) RRF 퓨전
+
+    doc_id 없거나 Qdrant 미연결 시 BM25 단독으로 fallback.
+    """
+    # BM25
+    bm25_chunks = _find_relevant_chunks_bm25(question, raw_chunks)
+
+    # Dense (선택적)
+    dense_chunks: list[str] = []
+    if doc_id:
+        try:
+            from summarizer.embedder import search_chunks
+            dense_chunks = search_chunks(question, doc_id, top_k=MAX_RAW_CHUNKS)
+        except Exception as e:
+            logger.warning("Dense 검색 실패 — BM25 단독 사용: %s", e)
+
+    if not dense_chunks:
+        return bm25_chunks
+
+    fused = _rrf_fusion(bm25_chunks, dense_chunks)
+    logger.info("RRF 퓨전 완료 — bm25:%d dense:%d → fused:%d",
+                len(bm25_chunks), len(dense_chunks), len(fused))
+    return fused
+
+
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
     if not summary.sections:
         return []
@@ -177,8 +237,15 @@ def ask(
     summary: SummaryResult,
     raw_chunks: list[str] | None = None,
     pinned_section_indices: list[int] | None = None,
+    doc_id: str | None = None,
 ) -> QAResult:
-    logger.info("Q&A 시작 — 질문: %r", question[:50])
+    """
+    Q&A 메인 함수.
+
+    doc_id 제공 시 BM25 + Dense(Qdrant) 하이브리드 검색 + RRF 퓨전 사용.
+    doc_id 없으면 기존 BM25 단독 동작 (하위 호환).
+    """
+    logger.info("Q&A 시작 — 질문: %r (doc_id=%s)", question[:50], doc_id)
 
     if pinned_section_indices is not None:
         relevant_sections = [
@@ -189,12 +256,12 @@ def ask(
     else:
         relevant_sections = _find_relevant_sections_bm25(question, summary)
 
-    relevant_chunks = _find_relevant_chunks_bm25(question, raw_chunks or [])
+    # 하이브리드 청크 검색 (doc_id 있으면 RRF, 없으면 BM25)
+    relevant_chunks = _find_relevant_chunks_hybrid(question, raw_chunks or [], doc_id=doc_id)
 
     template = QA_PROMPT_PATH.read_text(encoding="utf-8")
 
     try:
-        # 1차 시도: BM25 섹션/청크 기반
         if relevant_sections or relevant_chunks:
             context     = _build_context(relevant_sections, relevant_chunks)
             user_prompt = template.format(question=question, context=context)
@@ -205,9 +272,8 @@ def ask(
                 logger.info("Q&A 완료 — 출처 %d개", len(sources))
                 return QAResult(answer=raw, sources=sources, is_answerable=True)
 
-            logger.info("BM25 섹션 답변 불가 — overall fallback 시도")
+            logger.info("하이브리드 검색 답변 불가 — overall fallback 시도")
 
-        # 2차 시도: overall fallback
         if not summary.overall:
             logger.warning("overall 없음 — 답변 불가")
             return QAResult(answer="문서에서 해당 내용을 찾을 수 없습니다.", sources=[], is_answerable=False)
@@ -220,7 +286,7 @@ def ask(
         if _is_unanswerable(raw):
             return QAResult(answer=raw, sources=[], is_answerable=False)
 
-        logger.info("Q&A 완료 (overall fallback) — 출처 0개")
+        logger.info("Q&A 완료 (overall fallback)")
         return QAResult(answer=raw, sources=[], is_answerable=True)
 
     except Exception as e:
