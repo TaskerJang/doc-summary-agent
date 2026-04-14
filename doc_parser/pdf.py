@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from doc_parser.ocr_cache import extract_text_with_cache
+from doc_parser.ocr_cache import extract_text_with_cache, extract_page_with_cache
+
+# pymupdf4llm이 이미지를 생략할 때 삽입하는 마커
+_OMITTED_MARKER = "intentionally omitted"
 
 
 def is_image_based_pdf(pdf_path: Path) -> bool:
@@ -22,8 +25,8 @@ _is_image_based_pdf = is_image_based_pdf
 def parse(pdf_path: Path) -> str:
     """
     진입점 — 이미지 기반 PDF 여부를 먼저 판단 후 파싱 전략 결정
-    이미지 기반 (80% 이상) → OCR
-    텍스트 기반 → pymupdf4llm (텍스트 없는 페이지는 pdfplumber fallback) → overall fallback
+    이미지 기반 (페이지당 평균 500자 미만) → 전체 EasyOCR
+    텍스트 기반 → pymupdf4llm + 페이지별 선택 OCR + pdfplumber fallback
     """
     if is_image_based_pdf(pdf_path):
         return _parse_ocr(pdf_path)
@@ -52,6 +55,11 @@ def parse_bytes(data: bytes, filename: str = "upload.pdf") -> str:
 def _is_image_based_page(page) -> bool:
     """페이지 하나를 받아 이미지 기반인지 True/False 반환"""
     return not page.get_text().strip()
+
+
+def _has_embedded_images(md_text: str) -> bool:
+    """pymupdf4llm 변환 결과에 생략된 이미지 마커가 있는지 확인"""
+    return _OMITTED_MARKER in md_text
 
 
 def _extract_page_text_pdfplumber(pdf_path: Path, page_index: int) -> str:
@@ -84,16 +92,16 @@ def _extract_page_text_pdfplumber(pdf_path: Path, page_index: int) -> str:
 
 def _parse_pymupdf4llm(pdf_path: Path) -> str:
     """
-    텍스트 페이지는 pymupdf4llm으로 Markdown 변환.
-    텍스트가 없는 페이지(벡터 그래픽·표 등)는 pdfplumber로 fallback 처리하여
-    내용 유실 없이 병합.
+    페이지별 3단계 처리:
+      1) get_text() 있음  → pymupdf4llm Markdown 변환
+         1-1) 변환 결과에 이미지 마커 있음 → EasyOCR로 이미지 영역 텍스트 보강
+      2) get_text() 없음  → pdfplumber fallback
+      3) pdfplumber도 빈 값 → EasyOCR 페이지 단위 OCR
     """
     import fitz
     import pymupdf4llm
 
     doc = fitz.open(str(pdf_path))
-    page_texts: list[str] = []
-
     text_page_indices = []
     fallback_page_indices = []
 
@@ -112,30 +120,41 @@ def _parse_pymupdf4llm(pdf_path: Path) -> str:
             show_progress=False,
             table_strategy="lines_strict",
         )
-        # pymupdf4llm은 pages 순서대로 결과를 반환 → 인덱스 매핑
         md_pages = md.split("\f") if "\f" in md else [md]
         for idx, content in zip(text_page_indices, md_pages):
             pymupdf_result[idx] = content
 
-    # pdfplumber로 fallback 페이지 추출
+    # pdfplumber fallback (get_text() 빈 페이지)
     pdfplumber_result: dict[int, str] = {}
     for i in fallback_page_indices:
         fb_text = _extract_page_text_pdfplumber(pdf_path, i)
         if fb_text.strip():
             pdfplumber_result[i] = fb_text
 
-    # 원래 페이지 순서대로 병합
+    # 원래 페이지 순서대로 병합 + 이미지 임베딩 페이지 EasyOCR 보강
+    page_texts: list[str] = []
     for i in range(len(doc)):
         if i in pymupdf_result and pymupdf_result[i].strip():
-            page_texts.append(pymupdf_result[i])
+            content = pymupdf_result[i]
+            # 이미지 마커가 있으면 EasyOCR로 해당 페이지 추가 추출 후 append
+            if _has_embedded_images(content):
+                ocr_text = extract_page_with_cache(pdf_path, i)
+                if ocr_text.strip():
+                    content = content + "\n\n<!-- OCR --\n" + ocr_text + "\n-->"
+            page_texts.append(content)
         elif i in pdfplumber_result:
             page_texts.append(pdfplumber_result[i])
+        else:
+            # pdfplumber도 빈 경우 → EasyOCR 최후 수단
+            ocr_text = extract_page_with_cache(pdf_path, i)
+            if ocr_text.strip():
+                page_texts.append(ocr_text)
 
     return "\n\n".join(page_texts)
 
 
 def _parse_ocr(pdf_path: Path) -> str:
-    """이미지 기반 PDF → EasyOCR + 캐시"""
+    """이미지 기반 PDF 전체 → EasyOCR + 캐시"""
     pages = extract_text_with_cache(pdf_path)
     return "\n\n".join(pages)
 
