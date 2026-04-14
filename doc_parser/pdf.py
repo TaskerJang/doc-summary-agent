@@ -23,7 +23,7 @@ def parse(pdf_path: Path) -> str:
     """
     진입점 — 이미지 기반 PDF 여부를 먼저 판단 후 파싱 전략 결정
     이미지 기반 (80% 이상) → OCR
-    텍스트 기반 → pymupdf4llm → pdfplumber fallback
+    텍스트 기반 → pymupdf4llm (텍스트 없는 페이지는 pdfplumber fallback) → overall fallback
     """
     if is_image_based_pdf(pdf_path):
         return _parse_ocr(pdf_path)
@@ -54,30 +54,84 @@ def _is_image_based_page(page) -> bool:
     return not page.get_text().strip()
 
 
+def _extract_page_text_pdfplumber(pdf_path: Path, page_index: int) -> str:
+    """
+    pdfplumber로 특정 페이지(0-based index)의 텍스트 + 선 기반 표를 추출.
+    pymupdf4llm이 빈 문자열을 반환한 페이지에 대한 페이지 단위 fallback용.
+    """
+    import pdfplumber
+
+    lines = []
+    with pdfplumber.open(pdf_path) as pdf:
+        if page_index >= len(pdf.pages):
+            return ""
+        page = pdf.pages[page_index]
+
+        text = page.extract_text()
+        if text:
+            lines.append(text)
+
+        table_settings = {
+            "vertical_strategy": "lines",
+            "horizontal_strategy": "lines",
+        }
+        for table in page.extract_tables(table_settings):
+            for row in table:
+                lines.append(" | ".join(cell or "" for cell in row))
+
+    return "\n".join(lines)
+
+
 def _parse_pymupdf4llm(pdf_path: Path) -> str:
     """
-    텍스트 페이지만 걸러서 pymupdf4llm으로 Markdown 변환
-    이미지 페이지는 건너뜀
+    텍스트 페이지는 pymupdf4llm으로 Markdown 변환.
+    텍스트가 없는 페이지(벡터 그래픽·표 등)는 pdfplumber로 fallback 처리하여
+    내용 유실 없이 병합.
     """
     import fitz
     import pymupdf4llm
 
     doc = fitz.open(str(pdf_path))
+    page_texts: list[str] = []
 
-    text_page_indices = [
-        i for i, page in enumerate(doc)
-        if not _is_image_based_page(page)
-    ]
+    text_page_indices = []
+    fallback_page_indices = []
 
-    if not text_page_indices:
-        return ""
+    for i, page in enumerate(doc):
+        if _is_image_based_page(page):
+            fallback_page_indices.append(i)
+        else:
+            text_page_indices.append(i)
 
-    return pymupdf4llm.to_markdown(
-        doc,
-        pages=text_page_indices,
-        show_progress=False,
-        table_strategy="lines_strict",
-    )
+    # pymupdf4llm으로 텍스트 페이지 일괄 변환
+    pymupdf_result: dict[int, str] = {}
+    if text_page_indices:
+        md = pymupdf4llm.to_markdown(
+            doc,
+            pages=text_page_indices,
+            show_progress=False,
+            table_strategy="lines_strict",
+        )
+        # pymupdf4llm은 pages 순서대로 결과를 반환 → 인덱스 매핑
+        md_pages = md.split("\f") if "\f" in md else [md]
+        for idx, content in zip(text_page_indices, md_pages):
+            pymupdf_result[idx] = content
+
+    # pdfplumber로 fallback 페이지 추출
+    pdfplumber_result: dict[int, str] = {}
+    for i in fallback_page_indices:
+        fb_text = _extract_page_text_pdfplumber(pdf_path, i)
+        if fb_text.strip():
+            pdfplumber_result[i] = fb_text
+
+    # 원래 페이지 순서대로 병합
+    for i in range(len(doc)):
+        if i in pymupdf_result and pymupdf_result[i].strip():
+            page_texts.append(pymupdf_result[i])
+        elif i in pdfplumber_result:
+            page_texts.append(pdfplumber_result[i])
+
+    return "\n\n".join(page_texts)
 
 
 def _parse_ocr(pdf_path: Path) -> str:
@@ -88,8 +142,8 @@ def _parse_ocr(pdf_path: Path) -> str:
 
 def _parse_pdfplumber(pdf_path: Path) -> str:
     """
-    pymupdf4llm 결과가 비어있을 때 fallback
-    텍스트 + 선 기반 표 추출
+    pymupdf4llm 결과가 전체 공백일 때 overall fallback.
+    텍스트 + 선 기반 표 추출.
     """
     import pdfplumber
 
