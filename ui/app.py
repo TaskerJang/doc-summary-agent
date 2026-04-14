@@ -14,7 +14,7 @@ from summarizer.llm import SummaryResult, SectionSummary
 from summarizer.qa import ask, generate_follow_ups
 
 
-# ── 헬퍼: result dict → SummaryResult 복원 ────────────────────────
+# ── 헬퍼: result dict → SummaryResult 복원 ────────────────
 def _to_summary_result(result: dict) -> SummaryResult | None:
     summary_dict = result.get("summary")
     if not summary_dict:
@@ -27,13 +27,13 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
     )
 
 
-# ── 헬퍼: result dict → raw_chunks 텍스트 리스트 추출 ─────────────
+# ── 헬퍼: result dict → raw_chunks 텍스트 리스트 추출 ─────
 def _to_raw_chunks(result: dict) -> list[str]:
     chunks = result.get("chunks", [])
     return [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
 
 
-# ── 헬퍼: 섹션명 정제 (## ** 제거, no section 대체) ─────────────
+# ── 헬퍼: 섹션명 정제 ──────────────────────────────────────
 def _clean(name: str) -> str:
     name = re.sub(r"^#+\s*", "", name)
     name = re.sub(r"\*+", "", name)
@@ -43,19 +43,19 @@ def _clean(name: str) -> str:
     return name
 
 
-# ── 헬퍼: ~~ 취소선 방지 ──────────────────────────────
+# ── 헬퍼: ~~ 취소선 방지 ───────────────────────────────────
 def _fix_tilde(text: str) -> str:
     return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
 
 
-# ── 헬퍼: None 메타값 표시용 ─────────────────────────────
+# ── 헬퍼: None 메타값 표시용 ──────────────────────────────
 def _fmt(value, suffix: str = "") -> str:
     if value is None:
         return "-"
     return f"{value}{suffix}"
 
 
-# ── 추천 질문 생성 (LLM 기반) ────────────────────────────
+# ── 추천 질문 생성 ─────────────────────────────────────────
 def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     if not summary:
         defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
@@ -63,19 +63,14 @@ def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
             cl.Action(name="followup", payload={"value": q}, label=q)
             for q in defaults
         ]
-
     follow_ups = generate_follow_ups(summary)
     return [
-        cl.Action(
-            name="followup",
-            payload={"value": fu.question},
-            label=fu.question,
-        )
+        cl.Action(name="followup", payload={"value": fu.question}, label=fu.question)
         for fu in follow_ups
     ]
 
 
-# ── 헬퍼: Q&A 답변 전송 (인라인 출처) ────────────────────
+# ── Q&A 답변 전송 ──────────────────────────────────────────
 async def _send_qa_answer(qa_result) -> None:
     msg = cl.Message(content="")
     await msg.send()
@@ -99,20 +94,19 @@ async def _send_qa_answer(qa_result) -> None:
                 lines.append(f"`{i+1}` **{section}** — {snippet}")
             else:
                 lines.append(f"`{i+1}` **{section}**")
-        sources_text = "\n".join(lines)
-        await msg.stream_token(f"\n\n---\n📌 **출처**\n{sources_text}")
+        await msg.stream_token(f"\n\n---\n📌 **출처**\n" + "\n".join(lines))
 
     await msg.update()
 
 
-# ── 세션 시작 ──────────────────────────────────────────────────
+# ── 세션 시작 ──────────────────────────────────────────────
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("result",     None)
     cl.user_session.set("raw_chunks", [])
     cl.user_session.set("doc_id",     None)
     await cl.Message(
-        content="안녕하세요! 📔 아래 **파일 업로드 버튼**으로 문서를 업로드해 주세요.\n\nPDF · DOCX · HWP · DOC 형식을 지원합니다."
+        content="안녕하세요! 📄 아래 **파일 업로드 버튼**으로 문서를 업로드해 주세요.\n\nPDF · DOCX · HWP · DOC 형식을 지원합니다."
     ).send()
 
 
@@ -120,7 +114,6 @@ async def on_chat_start():
 @cl.on_message
 async def on_message(message: cl.Message):
 
-    # ── 파일 업로드된 경우 ─────────────────────────────────
     if message.elements:
         file     = message.elements[0]
         filename = file.name
@@ -132,7 +125,6 @@ async def on_message(message: cl.Message):
             tmp_path.rename(new_path)
             tmp_path = new_path
 
-        # doc_id = 파일명 (벡터 DB 콜렉션 키)
         doc_id = filename
 
         # ── TaskList 초기화 ────────────────────────────────
@@ -141,8 +133,8 @@ async def on_message(message: cl.Message):
 
         task1 = cl.Task(title="Step 1 · 파싱",           status=cl.TaskStatus.RUNNING)
         task2 = cl.Task(title="Step 2 · 청킹",           status=cl.TaskStatus.READY)
-        task3 = cl.Task(title="Step 3 · 요약 생성",       status=cl.TaskStatus.READY)
-        task4 = cl.Task(title="Step 4 · 벡터 인덱스 생성", status=cl.TaskStatus.READY)
+        task3 = cl.Task(title="Step 3 · 벡터 인덱스 생성", status=cl.TaskStatus.READY)
+        task4 = cl.Task(title="Step 4 · 요약 생성",       status=cl.TaskStatus.READY)
 
         await task_list.add_task(task1)
         await task_list.add_task(task2)
@@ -150,7 +142,7 @@ async def on_message(message: cl.Message):
         await task_list.add_task(task4)
         await task_list.send()
 
-        # ── Step 1 ─────────────────────────────────────
+        # ── Step 1: 파싱 ──────────────────────────────────
         step1 = await asyncio.to_thread(run_step1, tmp_path)
 
         if step1.get("status") == "error":
@@ -171,7 +163,7 @@ async def on_message(message: cl.Message):
         task2.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # ── Step 2 ─────────────────────────────────────
+        # ── Step 2: 청킹 ──────────────────────────────────
         step2 = await asyncio.to_thread(run_step2, step1)
 
         if step2.get("status") == "error":
@@ -182,44 +174,45 @@ async def on_message(message: cl.Message):
             await cl.Message(content=f"❌ 청킹 실패: {step2.get('chunk_error', '알 수 없는 오류')}").send()
             return
 
+        raw_chunks = _to_raw_chunks(step2)
+
         task2.status = cl.TaskStatus.DONE
         task2.title  = f"Step 2 · 청킹 완료 — {step2.get('chunk_count', 0)}개 청크"
         task3.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # ── Step 3 ─────────────────────────────────────
+        # ── Step 3: 벡터 인덱스 생성 (청킹 직후) ──────────
+        try:
+            from summarizer.embedder import index_chunks
+            await asyncio.to_thread(index_chunks, raw_chunks, doc_id)
+            task3.status = cl.TaskStatus.DONE
+            task3.title  = f"Step 3 · 벡터 인덱스 완료 — {len(raw_chunks)}청크"
+        except Exception as e:
+            task3.status = cl.TaskStatus.FAILED
+            task3.title  = "Step 3 · 벡터 인덱스 실패 (BM25 fallback)"
+            doc_id = None  # 인덱싱 실패 시 BM25 단독 사용
+
+        task4.status = cl.TaskStatus.RUNNING
+        await task_list.send()
+
+        # ── Step 4: 요약 생성 ──────────────────────────────
         step3 = await asyncio.to_thread(run_step3, step2)
 
         summary_dict  = step3.get("summary", {})
         section_count = len(summary_dict.get("sections", []))
 
         if step3.get("status") == "partial":
-            task3.status = cl.TaskStatus.FAILED
-            task3.title  = "Step 3 · 요약 실패"
-        else:
-            task3.status = cl.TaskStatus.DONE
-            task3.title  = f"Step 3 · 요약 완료 — {section_count}개 섹션"
-
-        task4.status = cl.TaskStatus.RUNNING
-        await task_list.send()
-
-        # ── Step 4: 벡터 인덱스 생성 (Qdrant) ─────────────────
-        raw_chunks = _to_raw_chunks(step3)
-        try:
-            from summarizer.embedder import index_chunks
-            await asyncio.to_thread(index_chunks, raw_chunks, doc_id)
-            task4.status = cl.TaskStatus.DONE
-            task4.title  = f"Step 4 · 벡터 인덱스 완료 — {len(raw_chunks)}청크"
-        except Exception as e:
             task4.status = cl.TaskStatus.FAILED
-            task4.title  = f"Step 4 · 벡터 인덱스 실패 (단순 BM25 사용)"
-            doc_id = None  # 인덱스 실패 시 BM25 fallback
-
-        if step3.get("status") != "partial":
+            task4.title  = "Step 4 · 요약 실패"
+            task_list.status = "부분 완료"
+        else:
+            task4.status = cl.TaskStatus.DONE
+            task4.title  = f"Step 4 · 요약 완료 — {section_count}개 섹션"
             task_list.status = "완료 ✓"
+
         await task_list.send()
 
-        # ── 결과 저장 ────────────────────────────────────
+        # ── 결과 저장 ──────────────────────────────────────
         cl.user_session.set("result",     step3)
         cl.user_session.set("raw_chunks", raw_chunks)
         cl.user_session.set("doc_id",     doc_id)
@@ -230,35 +223,23 @@ async def on_message(message: cl.Message):
             overall = _fix_tilde(summary.overall)
             msg     = cl.Message(content="")
             await msg.send()
-            await msg.stream_token("📔 **전체 요약**\n\n")
+            await msg.stream_token("📄 **전체 요약**\n\n")
             for ch in overall:
                 await msg.stream_token(ch)
             await msg.update()
         else:
             await cl.Message(content="⚠️ 전체 요약을 생성하지 못했습니다.").send()
 
-        # ── PDF 원문 사이드 뷰어 (PDF만) ──────────────────
+        # ── PDF 원문 사이드 뷰어 ───────────────────────────
         if tmp_path.suffix.lower() == ".pdf":
             elements = [
-                cl.Pdf(
-                    name=filename,
-                    display="side",
-                    path=str(tmp_path),
-                    page=1,
-                )
+                cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)
             ]
-            await cl.Message(
-                content=f"📂 원문 보기 — {filename}",
-                elements=elements,
-            ).send()
+            await cl.Message(content=f"📂 원문 보기 — {filename}", elements=elements).send()
 
-        # ── 추천 질문 ────────────────────────────────────
+        # ── 추천 질문 ──────────────────────────────────────
         actions = _build_follow_ups(summary)
-        await cl.Message(
-            content="💬 **이런 것도 물어보세요**",
-            actions=actions,
-        ).send()
-
+        await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
         return
 
     # ── 텍스트 질문 처리 (Q&A) ────────────────────────────
@@ -279,7 +260,7 @@ async def on_message(message: cl.Message):
     await _send_qa_answer(qa_result)
 
 
-# ── 추천 질문 버튼 클릭 ──────────────────────────────────
+# ── 추천 질문 버튼 클릭 ────────────────────────────────────
 @cl.action_callback("followup")
 async def on_followup(action: cl.Action):
     question   = action.payload["value"]
