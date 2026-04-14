@@ -2,9 +2,15 @@
 임베딩 + Qdrant 벡터 DB 레이어
 
 역할:
-- 청크 텍스트를 OpenAI text-embedding-3-small로 임베딩
+- 청크 텍스트를 BAAI/bge-m3로 로컬 임베딩 (한국어 금융 문서 최적화)
 - Qdrant 로컬 인스턴스에 저장/검색
-- 세션별 컬렉션 격리 (collection_name = doc_id)
+- 세션별 컬렉션 격리 (collection_name = doc_id 해시)
+
+bge-m3 선택 이유:
+- 다국어 SOTA 임베딩 모델 (한국어 성능 우수)
+- sparse + dense 동시 지원 (향후 full hybrid 확장 가능)
+- 로컬 실행으로 API 비용 없음
+- dim=1024, sentence-transformers로 바로 사용 가능
 
 의존:
     uv add qdrant-client sentence-transformers
@@ -14,29 +20,35 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 from typing import TYPE_CHECKING
+import os
 
-from openai import OpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance,
-    PointStruct,
-    VectorParams,
-)
+from qdrant_client.models import Distance, PointStruct, VectorParams
 
 if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
 
-_QDRANT_URL   = os.getenv("QDRANT_URL", "http://localhost:6333")
-_EMBED_MODEL  = "text-embedding-3-small"
-_EMBED_DIM    = 1536
-_BATCH_SIZE   = 64
+_QDRANT_URL  = os.getenv("QDRANT_URL", "http://localhost:6333")
+_EMBED_MODEL = "BAAI/bge-m3"
+_EMBED_DIM   = 1024
+_BATCH_SIZE  = 32  # bge-m3는 모델이 커서 배치 작게
 
-_openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_encoder: object | None = None
 _qdrant_client: QdrantClient | None = None
+
+
+def _get_encoder():
+    """bge-m3 인코더 싱글턴 — 첫 호출 시 모델 로드 (~2GB, 최초 1회 다운로드)."""
+    global _encoder
+    if _encoder is None:
+        from sentence_transformers import SentenceTransformer
+        logger.info("bge-m3 모델 로딩 중... (최초 1회 다운로드 필요)")
+        _encoder = SentenceTransformer(_EMBED_MODEL)
+        logger.info("bge-m3 로딩 완료")
+    return _encoder
 
 
 def _get_qdrant() -> QdrantClient:
@@ -47,12 +59,13 @@ def _get_qdrant() -> QdrantClient:
 
 
 def _embed_texts(texts: list[str]) -> list[list[float]]:
-    """OpenAI text-embedding-3-small 로 배치 임베딩."""
+    """bge-m3로 배치 임베딩. 로컬 CPU/GPU 실행."""
+    encoder = _get_encoder()
     vectors = []
     for i in range(0, len(texts), _BATCH_SIZE):
-        batch = texts[i : i + _BATCH_SIZE]
-        resp  = _openai_client.embeddings.create(model=_EMBED_MODEL, input=batch)
-        vectors.extend([d.embedding for d in resp.data])
+        batch = texts[i: i + _BATCH_SIZE]
+        embs  = encoder.encode(batch, normalize_embeddings=True, show_progress_bar=False)
+        vectors.extend(embs.tolist())
     return vectors
 
 
@@ -64,15 +77,15 @@ def _collection_name(doc_id: str) -> str:
 
 def index_chunks(chunks: list[str], doc_id: str) -> str:
     """
-    청크 리스트를 임베딩해 Qdrant에 저장.
+    청크 리스트를 bge-m3로 임베딩해 Qdrant에 저장.
     이미 동일 컬렉션이 존재하면 삭제 후 재생성 (문서 갱신 대응).
 
     Returns:
         컬렉션 이름
     """
-    client     = _get_qdrant()
-    col_name   = _collection_name(doc_id)
-    existing   = {c.name for c in client.get_collections().collections}
+    client   = _get_qdrant()
+    col_name = _collection_name(doc_id)
+    existing = {c.name for c in client.get_collections().collections}
 
     if col_name in existing:
         client.delete_collection(col_name)
@@ -96,7 +109,7 @@ def index_chunks(chunks: list[str], doc_id: str) -> str:
 
 def search_chunks(question: str, doc_id: str, top_k: int = 5) -> list[str]:
     """
-    Dense 검색: 질문 임베딩 → Qdrant cosine 유사도 검색.
+    Dense 검색: 질문 bge-m3 임베딩 → Qdrant cosine 유사도 검색.
 
     Returns:
         유사도 높은 청크 텍스트 리스트 (최대 top_k개)
