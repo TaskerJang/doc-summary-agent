@@ -28,7 +28,7 @@ def parse(pdf_path: Path) -> str:
     """
     진입점 — 이미지 기반 PDF 여부를 먼저 판단 후 파싱 전략 결정
     이미지 기반 (페이지당 평균 500자 미만) → 전체 EasyOCR
-    텍스트 기반 → pymupdf4llm + 페이지별 선택 OCR + pdfplumber fallback
+    텍스트 기반 → pymupdf4llm + 페이지별 선택 OCR/표추출 + pdfplumber fallback
     """
     if is_image_based_pdf(pdf_path):
         return _parse_ocr(pdf_path)
@@ -92,12 +92,49 @@ def _extract_page_text_pdfplumber(pdf_path: Path, page_index: int) -> str:
     return "\n".join(lines)
 
 
+def _supplement_images_with_tables(content: str, pdf_path: Path, page_index: int) -> str:
+    """
+    pymupdf4llm 결과에서 'intentionally omitted' 마커를 구조화 텍스트로 치환.
+
+    치환 우선순위:
+      1) gmft — 표 구조 감지 성공 시 Markdown 표로 치환
+      2) EasyOCR — gmft 미설치 또는 표 미감지 시 OCR 텍스트로 치환
+
+    gmft가 페이지 전체를 한 번에 처리하므로, 마커가 여러 개여도
+    페이지당 gmft 호출은 1회만 수행.
+    """
+    from doc_parser.table_extractor import extract_tables_from_page_safe
+
+    # gmft로 페이지 표 추출 시도 (1회)
+    gmft_available = True
+    gmft_text = ""
+    try:
+        gmft_text = extract_tables_from_page_safe(pdf_path, page_index)
+    except ImportError:
+        gmft_available = False
+
+    # EasyOCR 결과 (gmft 실패 or 표 없을 때 사용)
+    ocr_text = ""
+    if not gmft_available or not gmft_text.strip():
+        ocr_text = extract_page_with_cache(pdf_path, page_index)
+
+    def _replace_marker(match) -> str:
+        """마커 하나를 gmft 또는 OCR 결과로 치환"""
+        if gmft_text.strip():
+            return gmft_text
+        if ocr_text.strip():
+            return ocr_text
+        return match.group(0)  # 둘 다 실패 시 마커 유지
+
+    return _OMITTED_RE.sub(_replace_marker, content)
+
+
 def _parse_pymupdf4llm(pdf_path: Path) -> str:
     """
     페이지별 3단계 처리:
       1) get_text() 있음  → pymupdf4llm Markdown 변환
          1-1) 변환 결과에 이미지 마커 있음
-              → EasyOCR로 OCR 후 'intentionally omitted' 마커 자리에 직접 치환
+              → gmft 표 추출 시도 → 실패 시 EasyOCR fallback
       2) get_text() 없음  → pdfplumber fallback
       3) pdfplumber도 빈 값 → EasyOCR 페이지 단위 OCR
     """
@@ -134,16 +171,13 @@ def _parse_pymupdf4llm(pdf_path: Path) -> str:
         if fb_text.strip():
             pdfplumber_result[i] = fb_text
 
-    # 원래 페이지 순서대로 병합 + 이미지 임베딩 페이지 EasyOCR 치환
+    # 원래 페이지 순서대로 병합 + 이미지 임베딩 → gmft/OCR 치환
     page_texts: list[str] = []
     for i in range(len(doc)):
         if i in pymupdf_result and pymupdf_result[i].strip():
             content = pymupdf_result[i]
-            # intentionally omitted 마커를 EasyOCR 결과로 직접 치환
             if _has_embedded_images(content):
-                ocr_text = extract_page_with_cache(pdf_path, i)
-                if ocr_text.strip():
-                    content = _OMITTED_RE.sub(ocr_text, content)
+                content = _supplement_images_with_tables(content, pdf_path, i)
             page_texts.append(content)
         elif i in pdfplumber_result:
             page_texts.append(pdfplumber_result[i])
