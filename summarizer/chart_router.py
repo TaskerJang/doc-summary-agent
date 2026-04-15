@@ -17,6 +17,15 @@ chat2plot 패턴 — 에이전트·코드 실행 없이 LLM JSON spec만 사용.
   - 음수 / 하락 → NEGATIVE_COLOR(빨강)
   - waterfall 합계 bar → TOTAL_COLOR(청록)
   - multiline 시리즈 → MULTILINE_PALETTE 순환
+
+height 정책:
+  - bar / line / pie : 260px
+  - waterfall        : 300px  (bar 위 텍스트 공간 필요)
+  - multiline        : 320px  (상단 legend 공간 필요)
+  - 근거: Chainlit InlinedPlotlyList.tsx가 컨테이너를 h-[400px]로
+    하드코딩하며 size 파라미터를 무시함(Issue #1919). Figure height는
+    컨테이너 내부 Plotly autosize에 반영되므로 직접 조정이 유효함.
+    브라우저 실측 plot area 기준(width=469, height=274)으로 확인.
 """
 from __future__ import annotations
 
@@ -40,6 +49,11 @@ MULTILINE_PALETTE = [
     "#B279A2",  # 보라
     "#E45756",  # 빨강
 ]
+
+# ── height 상수 ───────────────────────────────────────────
+HEIGHT_DEFAULT   = 260  # bar / line / pie
+HEIGHT_WATERFALL = 300  # bar 위 텍스트 공간 필요
+HEIGHT_MULTILINE = 320  # 상단 legend 공간 필요
 
 # plotly는 선택적 의존성 — 미설치 시 graceful skip
 try:
@@ -153,7 +167,7 @@ def _make_line(labels: list, values: list[float], title: str, unit: str) -> "go.
         yaxis_title=unit,
         template="plotly_white",
         margin=dict(l=40, r=20, t=50, b=40),
-        height=320,
+        height=HEIGHT_DEFAULT,
     )
     return fig
 
@@ -175,7 +189,6 @@ def _make_multiline(
         vals   = s.get("values") or []
         color  = MULTILINE_PALETTE[i % len(MULTILINE_PALETTE)]
 
-        # 길이 맞추기
         min_len = min(len(labels), len(vals))
         x = labels[:min_len]
         try:
@@ -214,8 +227,8 @@ def _make_multiline(
             xanchor="right",
             x=1,
         ),
-        margin=dict(l=40, r=20, t=70, b=40),  # legend 공간 확보
-        height=360,
+        margin=dict(l=40, r=20, t=70, b=40),
+        height=HEIGHT_MULTILINE,
     )
     return fig
 
@@ -236,7 +249,7 @@ def _make_bar(labels: list, values: list[float], title: str, unit: str) -> "go.F
         yaxis=dict(zeroline=has_negative, zerolinewidth=1.5, zerolinecolor="#888888"),
         template="plotly_white",
         margin=dict(l=40, r=20, t=50, b=40),
-        height=320,
+        height=HEIGHT_DEFAULT,
     )
     return fig
 
@@ -252,7 +265,7 @@ def _make_pie(labels: list, values: list[float], title: str) -> "go.Figure":
     fig.update_layout(
         title=dict(text=title, font=dict(size=14)),
         margin=dict(l=20, r=20, t=50, b=20),
-        height=320,
+        height=HEIGHT_DEFAULT,
     )
     return fig
 
@@ -298,7 +311,7 @@ def _make_waterfall(
         yaxis=dict(zeroline=True, zerolinewidth=1.5, zerolinecolor="#888888"),
         template="plotly_white",
         margin=dict(l=40, r=20, t=50, b=40),
-        height=340,
+        height=HEIGHT_WATERFALL,
         showlegend=False,
     )
     return fig
