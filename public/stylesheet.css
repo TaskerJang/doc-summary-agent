@@ -2,25 +2,30 @@
  * public/stylesheet.css
  * Chainlit 커스텀 스타일시트 — 자동 로드됨 (uv run chainlit run 시)
  *
- * 문제: Chainlit InlinedPlotlyList.tsx가 인라인 차트 컨테이너를
- *       max-w-[600px] h-[400px]로 하드코딩 (Issue #1919, 미수정).
- *       size 파라미터는 프론트엔드에서 무시됨.
+ * 문제: Chainlit InlinedPlotlyList.tsx가 인라인 차트 컨테이너에
+ *       style="max-width: fit-content; height: 400px;" 를 하드코딩.
+ *       (Issue #1919, 미수정)
+ *       클래스 선택자로는 인라인 스타일을 이길 수 없어 !important 필요.
  *
- * 해결: Figure height(260px)에 맞게 컨테이너 height를 오버라이드.
- *       빈 공간 제거 및 스크롤 가능하도록 overflow 설정.
+ * 실측 DOM 구조 (브라우저 console 확인):
+ *   div.max-w-[600px].h-[400px]  ← style="max-width:fit-content; height:400px"
+ *     └ div.flex.flex-col.gap-2  ← InlinedPlotlyList wrapper
+ *         └ .js-plotly-plot
+ *
+ * 해결: 인라인 height:400px을 !important로 Figure height에 맞게 축소.
+ *       height:auto로 설정해 Figure 자체 높이를 따르도록 함.
  */
 
-/* 인라인 Plotly 차트 컨테이너 height 오버라이드 */
-.flex.flex-col.gap-2 > div[style*="height: 400px"],
-.flex.flex-col.gap-2 > div[class*="h-[400px]"] {
+/* 실제 선택자: 부모 .flex.flex-col.gap-2 안의 인라인 height:400px div */
+.flex.flex-col.gap-2 > .max-w-\[600px\].h-\[400px\] {
     height: auto !important;
-    min-height: 200px !important;
-    max-height: 380px !important;
-    overflow: visible !important;
+    max-height: 350px !important;
+    min-height: 180px !important;
 }
 
-/* Plotly SVG가 컨테이너를 넘치지 않도록 */
-.flex.flex-col.gap-2 > div .js-plotly-plot,
-.flex.flex-col.gap-2 > div .plot-container {
-    height: 100% !important;
+/* 인라인 스타일 직접 타겟 (Tailwind 클래스명 변경 대비 fallback) */
+.flex.flex-col.gap-2 > div[style*="height: 400px"] {
+    height: auto !important;
+    max-height: 350px !important;
+    min-height: 180px !important;
 }
