@@ -1,7 +1,7 @@
 """
 ui/app.py
 Chainlit UI 진입점 — ChatGPT 스타일
-파일 업로드 → TaskList 진행 표시 → 전체 요약 → PDF 원문 → 추천 질문 → Q&A
+파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → PDF 원문 → 추천 질문 → Q&A
 """
 import asyncio
 import re
@@ -12,6 +12,7 @@ import chainlit as cl
 from main import run_step1, run_step2, run_step3
 from summarizer.llm import SummaryResult, SectionSummary
 from summarizer.qa import ask, generate_follow_ups
+from summarizer.chart_router import route as chart_route
 
 
 # ── 헬퍼: result dict → SummaryResult 복원 ────────────────
@@ -97,6 +98,30 @@ async def _send_qa_answer(qa_result) -> None:
         await msg.stream_token(f"\n\n---\n📌 **출처**\n" + "\n".join(lines))
 
     await msg.update()
+
+
+# ── 섹션별 차트 렌더링 ─────────────────────────────────────
+async def _render_charts(summary: SummaryResult) -> None:
+    """
+    SummaryResult의 각 섹션에서 chart_spec을 추출해 cl.Plotly()로 렌더링한다.
+    chart_route()가 None을 반환하면 해당 섹션은 조용히 건너뜀 (graceful fallback).
+    """
+    for sec in summary.sections:
+        try:
+            fig = chart_route(sec.chart_spec)
+            if fig is None:
+                continue
+            section_label = _clean(sec.section)
+            await cl.Message(
+                content=f"📊 **{section_label}**",
+                elements=[
+                    cl.Plotly(name=section_label, figure=fig, display="inline")
+                ],
+            ).send()
+        except Exception as e:
+            # 개별 차트 실패는 전체 흐름을 멈추지 않음
+            import logging
+            logging.getLogger(__name__).warning("차트 렌더링 실패 (section=%r): %s", sec.section, e)
 
 
 # ── 세션 시작 ──────────────────────────────────────────────
@@ -229,6 +254,10 @@ async def on_message(message: cl.Message):
             await msg.update()
         else:
             await cl.Message(content="⚠️ 전체 요약을 생성하지 못했습니다.").send()
+
+        # ── 섹션별 차트 렌더링 (이슈 #60) ─────────────────
+        if summary:
+            await _render_charts(summary)
 
         # ── PDF 원문 사이드 뷰어 ───────────────────────────
         if tmp_path.suffix.lower() == ".pdf":
