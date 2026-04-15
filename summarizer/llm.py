@@ -4,6 +4,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
 from pydantic import BaseModel
@@ -32,9 +33,10 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ── 출력 스키마 ────────────────────────────────────────────
 class SectionSummary(BaseModel):
-    section: str
-    bullets: list[str]
-    source: str
+    section:    str
+    bullets:    list[str]
+    source:     str
+    chart_spec: dict[str, Any] | None = None  # 시각화 라우팅용 (이슈 #60)
 
 
 class SummaryResult(BaseModel):
@@ -97,7 +99,7 @@ def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | None:
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
-            max_tokens=500,
+            max_tokens=600,  # chart_spec 필드 추가로 500 → 600 상향
         )
 
         raw = raw.strip()
@@ -121,7 +123,17 @@ def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | None:
             )
             data = json.loads(raw_fixed)
 
+        # chart_spec이 없거나 chart_type=none이면 None으로 정규화
+        chart_spec = data.get("chart_spec")
+        if isinstance(chart_spec, dict):
+            if str(chart_spec.get("chart_type", "none")).lower() == "none":
+                chart_spec = None
+        else:
+            chart_spec = None
+
+        data["chart_spec"] = chart_spec
         return SectionSummary(**data)
+
     except Exception as e:
         logger.warning("청크 요약 실패 (section=%r): %s", section, e)
         return None
@@ -173,6 +185,7 @@ def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult
     """
     청크 배열을 받아 전체 요약 및 섹션별 요약을 반환한다.
     청크 요약은 ThreadPoolExecutor로 병렬 처리한다.
+    각 SectionSummary에는 chart_spec이 포함될 수 있다 (이슈 #60).
     """
     chunk_count = len(chunks)
     logger.info("요약 시작 — 청크 %d개  is_image_based=%s", chunk_count, is_image_based)
@@ -200,7 +213,11 @@ def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult
     # Reduce: 전체 핵심 요약 (청크 수 기반 불릿 수 동적 결정)
     overall = _summarize_overall(sections, system_prompt, chunk_count)
 
-    logger.info("요약 완료 — 섹션 %d개  불릿 수 기준 %d개", len(sections), _resolve_bullet_count(chunk_count))
+    chart_count = sum(1 for s in sections if s.chart_spec is not None)
+    logger.info(
+        "요약 완료 — 섹션 %d개  불릿 수 기준 %d개  차트 생성 대상 %d개",
+        len(sections), _resolve_bullet_count(chunk_count), chart_count,
+    )
     return SummaryResult(
         overall=overall,
         sections=sections,
