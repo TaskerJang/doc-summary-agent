@@ -24,6 +24,10 @@ chat2plot 패턴 — 에이전트·코드 실행 없이 LLM JSON spec만 사용.
   - height는 차트 유형별로 차등 적용
   - 근거: Chainlit 2.11.0 #2861 — Figure height 반영. autosize=True(기본값)시
     컨테이너 너비에 맞게 늘어나 비율이 깨지는 문제를 autosize=False로 방지.
+
+bar 두께 정책:
+  - bargap=0.4 — 항목 수가 적을 때 bar가 과도하게 넓어지는 Plotly 기본 동작 방지
+  - bargap 범위: 0(간격 없음) ~ 1(bar 없음), 0.4가 금융 보고서 표준 비율
 """
 from __future__ import annotations
 
@@ -49,12 +53,14 @@ MULTILINE_PALETTE = [
 ]
 
 # ── 크기 상수 ─────────────────────────────────────────────
-# Chainlit 인라인 컨테이너 max-width=600px 기준
-# width=480으로 좌우 여백 확보, autosize=False로 컨테이너 autosize 방지
 CHART_WIDTH      = 480
 HEIGHT_DEFAULT   = 260  # bar / line / pie
 HEIGHT_WATERFALL = 300  # bar 위 텍스트 공간 필요
 HEIGHT_MULTILINE = 320  # 상단 legend 공간 필요
+
+# ── bar 두께 상수 ─────────────────────────────────────────
+# 0(간격 없음) ~ 1(bar 없음). 0.4 = bar 너비 60% 수준
+BAR_GAP = 0.4
 
 # plotly는 선택적 의존성 — 미설치 시 graceful skip
 try:
@@ -143,11 +149,6 @@ def route(spec: ChartSpec | None) -> "go.Figure | None":
 # ── 차트 생성 헬퍼 ────────────────────────────────────────
 
 def _bar_colors(values: list[float]) -> list[str]:
-    """
-    values의 부호에 따라 bar별 색상 리스트를 반환한다.
-    양수 → POSITIVE_COLOR(파랑), 음수 → NEGATIVE_COLOR(빨강).
-    모든 값이 양수이면 단색 리스트를 반환해 Plotly 최적화를 유지한다.
-    """
     if all(v >= 0 for v in values):
         return [POSITIVE_COLOR] * len(values)
     return [POSITIVE_COLOR if v >= 0 else NEGATIVE_COLOR for v in values]
@@ -178,12 +179,6 @@ def _make_line(labels: list, values: list[float], title: str, unit: str) -> "go.
 def _make_multiline(
     labels: list, series: list[dict], title: str, unit: str
 ) -> "go.Figure":
-    """
-    복수 시리즈 line chart.
-    series 형식: [{"name": "시리즈명", "values": [숫자, ...]}, ...]
-    - 시리즈 수를 최대 5개로 제한 (가독성 기준: Coupler.io 금융 대시보드 가이드)
-    - 각 시리즈 color는 MULTILINE_PALETTE 순환
-    """
     MAX_SERIES = 5
     traces = []
 
@@ -257,6 +252,7 @@ def _make_bar(labels: list, values: list[float], title: str, unit: str) -> "go.F
         width=CHART_WIDTH,
         height=HEIGHT_DEFAULT,
         margin=dict(l=40, r=20, t=50, b=40),
+        bargap=BAR_GAP,
     )
     return fig
 
@@ -282,10 +278,6 @@ def _make_pie(labels: list, values: list[float], title: str) -> "go.Figure":
 def _make_waterfall(
     labels: list, values: list[float], title: str, unit: str
 ) -> "go.Figure":
-    """
-    단계별 누적·차감 흐름 차트 (Zebra BI / pagination.com 금융 보고서 표준).
-    마지막 항목을 자동으로 "합계(total)" bar로 처리한다.
-    """
     TOTAL_KEYWORDS = {"합계", "순이익", "net profit", "net income", "total", "ebitda"}
 
     measures = []
@@ -323,6 +315,7 @@ def _make_waterfall(
         width=CHART_WIDTH,
         height=HEIGHT_WATERFALL,
         margin=dict(l=40, r=20, t=50, b=40),
+        bargap=BAR_GAP,
         showlegend=False,
     )
     return fig
