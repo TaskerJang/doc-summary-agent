@@ -4,6 +4,7 @@ Chainlit UI 진입점 — ChatGPT 스타일
 파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → PDF 원문 → 추천 질문 → Q&A
 """
 import asyncio
+import logging
 import re
 from pathlib import Path
 
@@ -13,6 +14,11 @@ from main import run_step1, run_step2, run_step3
 from summarizer.llm import SummaryResult, SectionSummary
 from summarizer.qa import ask, generate_follow_ups
 from summarizer.chart_router import route as chart_route
+
+logger = logging.getLogger(__name__)
+
+# ── 차트 상한선 (MIT Sloan 금융 시각화 best practice 기준) ─
+MAX_CHARTS_PER_DOC = 5
 
 
 # ── 헬퍼: result dict → SummaryResult 복원 ────────────────
@@ -104,9 +110,23 @@ async def _send_qa_answer(qa_result) -> None:
 async def _render_charts(summary: SummaryResult) -> None:
     """
     SummaryResult의 각 섹션에서 chart_spec을 추출해 cl.Plotly()로 렌더링한다.
+
+    상한선 정책 (MAX_CHARTS_PER_DOC):
+      - 문서 전체에서 최대 MAX_CHARTS_PER_DOC개만 렌더링한다.
+      - 초과분은 로그만 남기고 조용히 건너뜀.
+      - 근거: MIT Sloan 금융 시각화 best practice — 보고서당 4~6개 이하 권장.
+
     chart_route()가 None을 반환하면 해당 섹션은 조용히 건너뜀 (graceful fallback).
     """
+    rendered = 0
+
     for sec in summary.sections:
+        if rendered >= MAX_CHARTS_PER_DOC:
+            logger.info(
+                "차트 상한선 도달 (%d개) — 이후 섹션 차트 생략", MAX_CHARTS_PER_DOC
+            )
+            break
+
         try:
             fig = chart_route(sec.chart_spec)
             if fig is None:
@@ -118,10 +138,12 @@ async def _render_charts(summary: SummaryResult) -> None:
                     cl.Plotly(name=section_label, figure=fig, display="inline")
                 ],
             ).send()
+            rendered += 1
         except Exception as e:
-            # 개별 차트 실패는 전체 흐름을 멈추지 않음
-            import logging
-            logging.getLogger(__name__).warning("차트 렌더링 실패 (section=%r): %s", sec.section, e)
+            logger.warning("차트 렌더링 실패 (section=%r): %s", sec.section, e)
+
+    if rendered > 0:
+        logger.info("차트 렌더링 완료 — %d개 출력", rendered)
 
 
 # ── 세션 시작 ──────────────────────────────────────────────
