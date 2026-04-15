@@ -1,0 +1,26 @@
+/*
+ * public/stylesheet.css
+ * Chainlit 커스텀 스타일시트 — 자동 로드됨 (uv run chainlit run 시)
+ *
+ * 문제: Chainlit InlinedPlotlyList.tsx가 인라인 차트 컨테이너를
+ *       max-w-[600px] h-[400px]로 하드코딩 (Issue #1919, 미수정).
+ *       size 파라미터는 프론트엔드에서 무시됨.
+ *
+ * 해결: Figure height(260px)에 맞게 컨테이너 height를 오버라이드.
+ *       빈 공간 제거 및 스크롤 가능하도록 overflow 설정.
+ */
+
+/* 인라인 Plotly 차트 컨테이너 height 오버라이드 */
+.flex.flex-col.gap-2 > div[style*="height: 400px"],
+.flex.flex-col.gap-2 > div[class*="h-[400px]"] {
+    height: auto !important;
+    min-height: 200px !important;
+    max-height: 380px !important;
+    overflow: visible !important;
+}
+
+/* Plotly SVG가 컨테이너를 넘치지 않도록 */
+.flex.flex-col.gap-2 > div .js-plotly-plot,
+.flex.flex-col.gap-2 > div .plot-container {
+    height: 100% !important;
+}
