@@ -4,6 +4,11 @@ LLM이 반환한 chart_spec(JSON)을 Plotly Figure로 변환한다.
 
 chat2plot 패턴 — 에이전트·코드 실행 없이 LLM JSON spec만 사용.
 실패 / 수치 2개 이하 / chart_type=none → None 반환 (graceful fallback)
+
+색상 정책 (MIT Sloan 금융 시각화 기준):
+  - bar: 양수 → POSITIVE_COLOR(파랑), 음수 → NEGATIVE_COLOR(빨강)
+  - line: 단일 색상
+  - pie: Plotly 기본 팔레트
 """
 from __future__ import annotations
 
@@ -13,6 +18,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 ChartSpec = dict[str, Any]
+
+# ── 색상 상수 ─────────────────────────────────────────────
+POSITIVE_COLOR = "#4C78A8"  # 파랑 — 양수 / 상승
+NEGATIVE_COLOR = "#E45756"  # 빨강 — 음수 / 하락
 
 # plotly는 선택적 의존성 — 미설치 시 graceful skip
 try:
@@ -88,14 +97,25 @@ def route(spec: ChartSpec | None) -> "go.Figure | None":
 
 # ── 차트 생성 헬퍼 ────────────────────────────────────────
 
+def _bar_colors(values: list[float]) -> list[str]:
+    """
+    values의 부호에 따라 bar별 색상 리스트를 반환한다.
+    양수 → POSITIVE_COLOR(파랑), 음수 → NEGATIVE_COLOR(빨강).
+    모든 값이 양수이면 단색 리스트를 반환해 Plotly 최적화를 유지한다.
+    """
+    if all(v >= 0 for v in values):
+        return [POSITIVE_COLOR] * len(values)
+    return [POSITIVE_COLOR if v >= 0 else NEGATIVE_COLOR for v in values]
+
+
 def _make_line(labels: list, values: list[float], title: str, unit: str) -> "go.Figure":
     fig = go.Figure(
         go.Scatter(
             x=labels,
             y=values,
             mode="lines+markers",
-            marker=dict(size=7),
-            line=dict(width=2),
+            marker=dict(size=7, color=POSITIVE_COLOR),
+            line=dict(width=2, color=POSITIVE_COLOR),
         )
     )
     fig.update_layout(
@@ -109,16 +129,20 @@ def _make_line(labels: list, values: list[float], title: str, unit: str) -> "go.
 
 
 def _make_bar(labels: list, values: list[float], title: str, unit: str) -> "go.Figure":
+    colors = _bar_colors(values)
     fig = go.Figure(
         go.Bar(
             x=labels,
             y=values,
-            marker_color="steelblue",
+            marker_color=colors,
         )
     )
+    # 음수가 있으면 y=0 기준선을 명시적으로 표시
+    has_negative = any(v < 0 for v in values)
     fig.update_layout(
         title=dict(text=title, font=dict(size=14)),
         yaxis_title=unit,
+        yaxis=dict(zeroline=has_negative, zerolinewidth=1.5, zerolinecolor="#888888"),
         template="plotly_white",
         margin=dict(l=40, r=20, t=50, b=40),
         height=320,
