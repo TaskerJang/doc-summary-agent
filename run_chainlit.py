@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import chainlit.data as cl_data
 from chainlit.data import BaseDataLayer
-from chainlit.types import Feedback
+from chainlit.types import Feedback, PaginatedResponse, PageInfo
 from chainlit.user import PersistedUser
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,11 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
     async def get_thread(self, thread_id): return None
     async def get_thread_author(self, thread_id): return ""
     async def delete_thread(self, thread_id): pass
-    async def list_threads(self, pagination, filters): return None  # [] 안 됨
+    async def list_threads(self, pagination, filters):
+        return PaginatedResponse(
+            pageInfo=PageInfo(hasNextPage=False, startCursor=None, endCursor=None),
+            data=[],
+        )
     async def get_element(self, thread_id, element_id): return None
     async def create_element(self, element): pass
     async def delete_element(self, element_id, thread_id=None): pass
@@ -75,7 +79,7 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
     async def delete_feedback(self, feedback_id): return True
     async def build_debug_url(self) -> str: return ""
     async def close(self): pass
-    async def get_favorite_steps(self): return None
+    async def get_favorite_steps(self): return []
 
 
 cl_data._data_layer = FeedbackOnlyDataLayer()
