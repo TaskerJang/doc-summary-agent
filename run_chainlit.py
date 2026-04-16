@@ -10,7 +10,44 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 
 DB_URL = "sqlite+aiosqlite:///./chainlit.db"
 
-# Chainlit 2.11 SQLAlchemy 스키마 — get_all_user_threads 소스 기준
+# ── #69 Chainlit 프론트엔드 패치 ─────────────────────────────────────────────
+# Chainlit 2.11 프론트엔드는 FirstUserInteraction이 항상 undefined라
+# 새 대화에서 thumbs up/down 이 항상 disabled 됨.
+# 해결: index.js 번들에서 f=kn(O6) → f=true 로 패치
+def _patch_frontend() -> None:
+    import os
+    import glob
+
+    cl_dir = os.path.dirname(__import__("chainlit").__file__)
+    fe_dir = os.path.join(cl_dir, "frontend", "dist", "assets")
+    pattern = os.path.join(fe_dir, "index-*.js")
+    files = glob.glob(pattern)
+    if not files:
+        print("[patch] index-*.js 파일을 찾지 못함")
+        return
+
+    target = files[0]
+    MARKER = "/* feedback-patch-applied */"
+
+    with open(target, encoding="utf-8") as f:
+        content = f.read()
+
+    if MARKER in content:
+        return  # 이미 패치 적용됨
+
+    if "f=kn(O6)" not in content:
+        print("[patch] 패치 대상 패턴을 찾지 못함 — Chainlit 버전 확인 필요")
+        return
+
+    patched = content.replace("f=kn(O6)", f"f=true{MARKER}")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(patched)
+    print(f"[patch] 피드백 버튼 패치 완료: {os.path.basename(target)}")
+
+
+_patch_frontend()
+
+# ── Chainlit 2.11 SQLAlchemy 스키마 ─────────────────────────────────────────────
 _CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     "id"          TEXT PRIMARY KEY,
@@ -80,7 +117,6 @@ CREATE TABLE IF NOT EXISTS feedbacks (
 );
 """
 
-# 기존 DB 마이그레이션 — 누락 컬럼 추가 (idempotent)
 _MIGRATIONS = [
     'ALTER TABLE steps ADD COLUMN "defaultOpen" INTEGER DEFAULT 0',
     'ALTER TABLE steps ADD COLUMN "autoCollapse" INTEGER DEFAULT 0',
@@ -89,7 +125,6 @@ _MIGRATIONS = [
 
 
 async def _init_db() -> None:
-    """DB 테이블 생성 + 마이그레이션 (idempotent)."""
     import aiosqlite
     async with aiosqlite.connect("./chainlit.db") as db:
         await db.executescript(_CREATE_TABLES_SQL)
@@ -97,7 +132,7 @@ async def _init_db() -> None:
             try:
                 await db.execute(stmt)
             except Exception:
-                pass  # 이미 존재하면 무시
+                pass
         await db.commit()
 
 
