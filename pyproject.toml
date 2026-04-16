@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiosqlite>=0.19.0",
     "bert-score>=0.3.13",
     "chainlit>=2.11.0",
     "docx2python>=3.6.2",
@@ -32,5 +33,6 @@ dependencies = [
     "rouge-score>=0.1.2",
     "sentence-transformers>=3.0.0",
     "six>=1.17.0",
+    "sqlalchemy>=2.0.0",
     "streamlit>=1.56.0",
 ]
