@@ -5,7 +5,6 @@ Chainlit UI 진입점 — ChatGPT 스타일
 """
 import asyncio
 import logging
-import os
 import re
 from pathlib import Path
 
@@ -21,26 +20,6 @@ logger = logging.getLogger(__name__)
 
 MAX_CHARTS_PER_DOC = 5
 CHART_SIZE = "small"
-
-# ── #69 Password 인증 ─────────────────────────────────────────────────────────────
-# .env에 APP_USERNAME / APP_PASSWORD 로 채워넓으면 로그인 화면 활성화
-# 없으면 None 반환 → Chainlit이 인증없이 진행 (단, thumbs up/down 미표시)
-_APP_USERNAME = os.getenv("APP_USERNAME", "admin")
-_APP_PASSWORD = os.getenv("APP_PASSWORD", "")
-
-
-@cl.password_auth_callback
-def auth_callback(username: str, password: str):
-    """
-    #69: Password 인증 콜백 — data layer + 인증 둘 다 활성화되어야 thumbs up/down UI 노출.
-    APP_PASSWORD가 비어있으면 인증 안 함 (None 반환).
-    """
-    if not _APP_PASSWORD:
-        # 비밀번호 미설정 시 인증 안 함 — feedback UI 미활성화
-        return None
-    if username == _APP_USERNAME and password == _APP_PASSWORD:
-        return cl.User(identifier=username, metadata={"role": "admin"})
-    return None
 
 
 def _to_summary_result(result: dict) -> SummaryResult | None:
@@ -229,7 +208,7 @@ async def on_settings_update(settings: dict) -> None:
 async def on_feedback(feedback) -> None:
     """
     QA 답변 메시지의 thumbs up/down 피드백 수집.
-    cl.Feedback 타입 힙트 제거 — Chainlit 2.10.x 호환.
+    FeedbackOnlyDataLayer.upsert_feedback() → feedback_log.jsonl 저장.
     """
     emoji     = "👍" if getattr(feedback, "value", None) == 1 else "👎"
     comment   = f" | 코멘트: {feedback.comment!r}" if getattr(feedback, "comment", None) else ""
