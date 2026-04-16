@@ -67,15 +67,24 @@ def _fmt(value, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
-def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
+def _build_follow_up_text(summary: SummaryResult | None) -> str:
+    """추천 질문을 클릭 가능한 텍스트 버튼으로 구성.
+
+    cl.Action은 HybridDataLayer 환경에서 on_chat_start를 재트리거하는
+    버그가 있어 일반 텍스트 메시지로 대체한다.
+    사용자가 버튼 텍스트를 복사해서 입력하거나, 텍스트 자체를 클릭하면
+    on_message로 처리된다.
+    """
     if not summary:
-        defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
-        return [cl.Action(name="followup", payload={"value": q}, label=q) for q in defaults]
-    follow_ups = generate_follow_ups(summary)
-    return [
-        cl.Action(name="followup", payload={"value": fu.question}, label=fu.question)
-        for fu in follow_ups
-    ]
+        questions = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
+    else:
+        follow_ups = generate_follow_ups(summary)
+        questions = [fu.question for fu in follow_ups]
+
+    lines = ["💬 **이런 것도 물어보세요**\n"]
+    for q in questions:
+        lines.append(f"- {q}")
+    return "\n".join(lines)
 
 
 async def _send_qa_answer(qa_result) -> None:
@@ -160,7 +169,7 @@ def _index_in_background(chunks: list[dict], doc_id: str) -> None:
 
 
 async def _run_qa(question: str) -> None:
-    """Q&A 공통 실행 — on_message / on_followup 양쪽에서 사용."""
+    """Q&A 공통 실행 — on_message에서 사용."""
     result     = cl.user_session.get("result")
     summary    = _to_summary_result(result)
     raw_chunks = cl.user_session.get("raw_chunks") or []
@@ -272,7 +281,7 @@ async def on_message(message: cl.Message):
         task4.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # Step 3: 인덱싱 백그라운드 + 요약 (핵심: bge-m3 GIL 블로킹 방지)
+        # 인덱싱 백그라운드 + 요약 (핵심: bge-m3 GIL 블로킹 방지)
         _index_in_background(chunks, filename)
         step3 = await run_step3(step2)
 
@@ -280,7 +289,7 @@ async def on_message(message: cl.Message):
         section_count = len(summary_dict.get("sections", []))
 
         task3.status = cl.TaskStatus.DONE
-        task3.title  = f"Step 3 · 벡터 인덱스 생성 중 (백그라운드)"
+        task3.title  = "Step 3 · 벡터 인덱스 생성 중 (백그라운드)"
         if step3.get("status") == "partial":
             task4.status = cl.TaskStatus.FAILED
             task4.title  = "Step 4 · 요약 실패"
@@ -319,16 +328,10 @@ async def on_message(message: cl.Message):
                 elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)],
             ).send()
 
-        # 추천 질문
-        actions = _build_follow_ups(summary)
-        await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
+        # 추천 질문 — cl.Action 대신 텍스트로 표시 (HybridDataLayer 환경에서 action_callback이 on_chat_start를 재트리거하는 버그 회피)
+        follow_up_text = _build_follow_up_text(summary)
+        await cl.Message(content=follow_up_text).send()
         return
 
-    # Q&A
+    # Q&A — 추천 질문 텍스트 포함 모든 일반 메시지 처리
     await _run_qa(message.content)
-
-
-@cl.action_callback("followup")
-async def on_followup(action: cl.Action):
-    await cl.Message(content=action.payload["value"], author="user").send()
-    await _run_qa(action.payload["value"])
