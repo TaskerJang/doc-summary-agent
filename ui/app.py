@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 MAX_CHARTS_PER_DOC = 5
 CHART_SIZE = "small"
+CHART_SEND_TIMEOUT = 5  # 차트 1개당 전송 타임아웃 (초) — blob_storage 없을 때 블로킹 방지
 
 # ── #69 Password 인증 ─────────────────────────────────────────────────────────
 _APP_USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -29,10 +30,6 @@ _APP_PASSWORD = os.getenv("APP_PASSWORD", "1234!")
 
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
-    """
-    #69: Password 인증 — SQLAlchemy data layer + 인증 둘 다 있어야
-    thread가 DB에 저장되고 사이드바 resume 시 thumbs up/down 활성화.
-    """
     if username == _APP_USERNAME and password == _APP_PASSWORD:
         return cl.User(identifier=username, metadata={"role": "admin"})
     return None
@@ -116,6 +113,24 @@ async def _send_qa_answer(qa_result) -> None:
     await msg.update()
 
 
+async def _send_chart(section_label: str, fig) -> None:
+    """차트 메시지 전송 — CHART_SEND_TIMEOUT 초 타임아웃."""
+    await asyncio.wait_for(
+        cl.Message(
+            content=f"📊 **{section_label}**",
+            elements=[
+                cl.Plotly(
+                    name=section_label,
+                    figure=fig,
+                    display="inline",
+                    size=CHART_SIZE,
+                )
+            ],
+        ).send(),
+        timeout=CHART_SEND_TIMEOUT,
+    )
+
+
 async def _render_charts(summary: SummaryResult) -> None:
     chart_enabled: bool = cl.user_session.get("chart_enabled", True)
     max_charts: int     = int(cl.user_session.get("max_charts", MAX_CHARTS_PER_DOC))
@@ -134,18 +149,10 @@ async def _render_charts(summary: SummaryResult) -> None:
             if fig is None:
                 continue
             section_label = _clean(sec.section)
-            await cl.Message(
-                content=f"📊 **{section_label}**",
-                elements=[
-                    cl.Plotly(
-                        name=section_label,
-                        figure=fig,
-                        display="inline",
-                        size=CHART_SIZE,
-                    )
-                ],
-            ).send()
+            await _send_chart(section_label, fig)
             rendered += 1
+        except asyncio.TimeoutError:
+            logger.warning("차트 전송 타임아웃 (section=%r) — 건너뜀", sec.section)
         except Exception as e:
             logger.warning("차트 렌더링 실패 (section=%r): %s", sec.section, e)
 
@@ -222,10 +229,6 @@ async def on_settings_update(settings: dict) -> None:
 # ── #69 Human Feedback 훅 ──────────────────────────────────────────────────
 @cl.on_feedback
 async def on_feedback(feedback) -> None:
-    """
-    QA 답변 메시지의 thumbs up/down 피드백 수집.
-    thread resume 후 활성화 — SQLAlchemy data layer가 step을 DB에 저장해야 동작.
-    """
     emoji     = "👍" if getattr(feedback, "value", None) == 1 else "👎"
     comment   = f" | 코멘트: {feedback.comment!r}" if getattr(feedback, "comment", None) else ""
     doc_id    = cl.user_session.get("doc_id") or "unknown"
