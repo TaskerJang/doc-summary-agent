@@ -5,6 +5,7 @@ Chainlit UI 진입점 — ChatGPT 스타일
 """
 import asyncio
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -20,6 +21,21 @@ logger = logging.getLogger(__name__)
 
 MAX_CHARTS_PER_DOC = 5
 CHART_SIZE = "small"
+
+# ── #69 Password 인증 ─────────────────────────────────────────────────────────
+_APP_USERNAME = os.getenv("APP_USERNAME", "admin")
+_APP_PASSWORD = os.getenv("APP_PASSWORD", "1234!")
+
+
+@cl.password_auth_callback
+def auth_callback(username: str, password: str):
+    """
+    #69: Password 인증 — SQLAlchemy data layer + 인증 둘 다 있어야
+    thread가 DB에 저장되고 사이드바 resume 시 thumbs up/down 활성화.
+    """
+    if username == _APP_USERNAME and password == _APP_PASSWORD:
+        return cl.User(identifier=username, metadata={"role": "admin"})
+    return None
 
 
 def _to_summary_result(result: dict) -> SummaryResult | None:
@@ -203,12 +219,12 @@ async def on_settings_update(settings: dict) -> None:
     )
 
 
-# ── #69 Human Feedback 훅 ───────────────────────────────────────────────────
+# ── #69 Human Feedback 훅 ──────────────────────────────────────────────────
 @cl.on_feedback
 async def on_feedback(feedback) -> None:
     """
     QA 답변 메시지의 thumbs up/down 피드백 수집.
-    FeedbackOnlyDataLayer.upsert_feedback() → feedback_log.jsonl 저장.
+    thread resume 후 활성화 — SQLAlchemy data layer가 step을 DB에 저장해야 동작.
     """
     emoji     = "👍" if getattr(feedback, "value", None) == 1 else "👎"
     comment   = f" | 코멘트: {feedback.comment!r}" if getattr(feedback, "comment", None) else ""
