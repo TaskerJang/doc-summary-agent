@@ -21,16 +21,10 @@ logger = logging.getLogger(__name__)
 # ── 차트 상한선 기본값 (사용자가 ChatSettings로 덮어쓸 수 있음) ─
 MAX_CHARTS_PER_DOC = 5
 
-# ── 차트 크기 (Chainlit 공식 문서 기준) ───────────────────
-# cl.Plotly(size=) 는 "small" | "medium" | "large" 만 유효.
-# Chainlit 프론트엔드(InlinedPlotlyList.tsx)가 컨테이너를
-# max-w-[600px] h-[400px]로 하드코딩하므로 Figure의 height px는
-# 컨테이너 레벨에서 무시됨. size="small"로 컨테이너 자체를 줄임.
-# 근거: Chainlit GitHub Issue #1919 (2025-02-20)
 CHART_SIZE = "small"
 
 
-# ── 헬퍼: result dict → SummaryResult 복원 ────────────────
+# ── 헬퍼: result dict → SummaryResult 복원 ───────────────────────────
 def _to_summary_result(result: dict) -> SummaryResult | None:
     summary_dict = result.get("summary")
     if not summary_dict:
@@ -43,13 +37,13 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
     )
 
 
-# ── 헬퍼: result dict → raw_chunks 텍스트 리스트 추출 ─────
+# ── 헬퍼: result dict → raw_chunks 텍스트 리스트 추출 ─────────────────
 def _to_raw_chunks(result: dict) -> list[str]:
     chunks = result.get("chunks", [])
     return [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
 
 
-# ── 헬퍼: 섹션명 정제 ──────────────────────────────────────
+# ── 헬퍼: 섹션명 정제 ────────────────────────────────────────────────
 def _clean(name: str) -> str:
     name = re.sub(r"^#+\s*", "", name)
     name = re.sub(r"\*+", "", name)
@@ -59,19 +53,19 @@ def _clean(name: str) -> str:
     return name
 
 
-# ── 헬퍼: ~~ 취소선 방지 ───────────────────────────────────
+# ── 헬퍼: ~~ 취소선 방지 ───────────────────────────────────────────────
 def _fix_tilde(text: str) -> str:
     return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
 
 
-# ── 헬퍼: None 메타값 표시용 ──────────────────────────────
+# ── 헬퍼: None 메타값 표시용 ──────────────────────────────────────────
 def _fmt(value, suffix: str = "") -> str:
     if value is None:
         return "-"
     return f"{value}{suffix}"
 
 
-# ── 추천 질문 생성 ─────────────────────────────────────────
+# ── 추천 질문 생성 ───────────────────────────────────────────────────
 def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     if not summary:
         defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
@@ -86,7 +80,7 @@ def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     ]
 
 
-# ── Q&A 답변 전송 ──────────────────────────────────────────
+# ── Q&A 답변 전송 ─────────────────────────────────────────────────────
 async def _send_qa_answer(qa_result) -> None:
     msg = cl.Message(content="")
     await msg.send()
@@ -115,9 +109,8 @@ async def _send_qa_answer(qa_result) -> None:
     await msg.update()
 
 
-# ── 섹션별 차트 렌더링 ─────────────────────────────────────
+# ── 섹션별 차트 렌더링 ────────────────────────────────────────────────
 async def _render_charts(summary: SummaryResult) -> None:
-    # ChatSettings에서 사용자가 설정한 값 우선, 없으면 상수 기본값 사용
     chart_enabled: bool = cl.user_session.get("chart_enabled", True)
     max_charts: int     = int(cl.user_session.get("max_charts", MAX_CHARTS_PER_DOC))
 
@@ -129,9 +122,7 @@ async def _render_charts(summary: SummaryResult) -> None:
 
     for sec in summary.sections:
         if rendered >= max_charts:
-            logger.info(
-                "차트 상한선 도달 (%d개) — 이후 섹션 차트 생략", max_charts
-            )
+            logger.info("차트 상한선 도달 (%d개) — 이후 섹션 차트 생략", max_charts)
             break
 
         try:
@@ -158,17 +149,13 @@ async def _render_charts(summary: SummaryResult) -> None:
         logger.info("차트 렌더링 완료 — %d개 출력 (size=%s)", rendered, CHART_SIZE)
 
 
-# ── 벡터 인덱싱 래퍼 (TaskList 업데이트 포함) ─────────────
+# ── 벡터 인덱싱 래퍼 (TaskList 업데이트 포함) ─────────────────────
 async def _run_index(
     raw_chunks: list[str],
     doc_id: str,
     task3: cl.Task,
     task_list: cl.TaskList,
 ) -> str | None:
-    """
-    벡터 인덱싱을 실행하고 task3 상태를 업데이트한다.
-    반환값: 성공 시 doc_id, 실패 시 None (BM25 fallback 신호)
-    """
     try:
         from summarizer.embedder import index_chunks
         await asyncio.to_thread(index_chunks, raw_chunks, doc_id)
@@ -184,14 +171,13 @@ async def _run_index(
         return None
 
 
-# ── 세션 시작 ──────────────────────────────────────────────
+# ── 세션 시작 ─────────────────────────────────────────────────────────────
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("result",     None)
     cl.user_session.set("raw_chunks", [])
     cl.user_session.set("doc_id",     None)
 
-    # ── ChatSettings 위젯 등록 및 초기값 세션 저장 (이슈 #67) ─
     settings = await cl.ChatSettings(
         [
             Switch(
@@ -220,7 +206,7 @@ async def on_chat_start():
     ).send()
 
 
-# ── ChatSettings 변경 훅 (이슈 #67) ───────────────────────
+# ── ChatSettings 변경 훅 ─────────────────────────────────────────────────
 @cl.on_settings_update
 async def on_settings_update(settings: dict) -> None:
     cl.user_session.set("chart_enabled", settings["chart_enabled"])
@@ -232,7 +218,7 @@ async def on_settings_update(settings: dict) -> None:
     )
 
 
-# ── 파일 업로드 + Q&A 처리 ─────────────────────────────────
+# ── 파일 업로드 + Q&A 처리 ────────────────────────────────────────────
 @cl.on_message
 async def on_message(message: cl.Message):
 
@@ -249,7 +235,6 @@ async def on_message(message: cl.Message):
 
         doc_id = filename
 
-        # ── TaskList 초기화 ────────────────────────────────
         task_list = cl.TaskList()
         task_list.status = "분석 중..."
 
@@ -264,7 +249,6 @@ async def on_message(message: cl.Message):
         await task_list.add_task(task4)
         await task_list.send()
 
-        # ── Step 1: 파싱 ──────────────────────────────────
         step1 = await asyncio.to_thread(run_step1, tmp_path)
 
         if step1.get("status") == "error":
@@ -285,7 +269,6 @@ async def on_message(message: cl.Message):
         task2.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # ── Step 2: 청킹 ──────────────────────────────────
         step2 = await asyncio.to_thread(run_step2, step1)
 
         if step2.get("status") == "error":
@@ -304,9 +287,6 @@ async def on_message(message: cl.Message):
         task4.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # ── Step 3 + Step 4: 벡터 인덱싱 ‖ 요약 병렬 실행 ─
-        # 두 작업은 서로 독립적이므로 gather로 동시 실행한다.
-        # 소요 시간: max(벡터 인덱싱, 요약) ≈ 35초 (기존 직렬 58초 대비 ~40% 단축)
         final_doc_id, step3 = await asyncio.gather(
             _run_index(raw_chunks, doc_id, task3, task_list),
             run_step3(step2),
@@ -326,13 +306,11 @@ async def on_message(message: cl.Message):
 
         await task_list.send()
 
-        # ── 결과 저장 ──────────────────────────────────────
         cl.user_session.set("result",     step3)
         cl.user_session.set("raw_chunks", raw_chunks)
         cl.user_session.set("doc_id",     final_doc_id)
         summary = _to_summary_result(step3)
 
-        # ── 전체 요약 스트리밍 ─────────────────────────────
         if summary and summary.overall and not summary.overall.startswith("["):
             overall = _fix_tilde(summary.overall)
             msg     = cl.Message(content="")
@@ -344,23 +322,20 @@ async def on_message(message: cl.Message):
         else:
             await cl.Message(content="⚠️ 전체 요약을 생성하지 못했습니다.").send()
 
-        # ── 섹션별 차트 렌더링 (이슈 #60) ─────────────────
         if summary:
             await _render_charts(summary)
 
-        # ── PDF 원문 사이드 뷰어 ───────────────────────────
         if tmp_path.suffix.lower() == ".pdf":
             elements = [
                 cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)
             ]
             await cl.Message(content=f"📂 원문 보기 — {filename}", elements=elements).send()
 
-        # ── 추천 질문 ──────────────────────────────────────
         actions = _build_follow_ups(summary)
         await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
         return
 
-    # ── 텍스트 질문 처리 (Q&A) ────────────────────────────
+    # ── 텍스트 질문 처리 (Q&A) ─────────────────────────────────────────
     result = cl.user_session.get("result")
     if not result:
         await cl.Message(content="먼저 문서를 업로드해 주세요.").send()
@@ -374,11 +349,12 @@ async def on_message(message: cl.Message):
     question   = message.content
     raw_chunks = cl.user_session.get("raw_chunks") or []
     doc_id     = cl.user_session.get("doc_id")
-    qa_result  = await asyncio.to_thread(ask, question, summary, raw_chunks, None, doc_id)
+    # ask()는 async def — 직접 await (to_thread 제거)
+    qa_result  = await ask(question, summary, raw_chunks, None, doc_id)
     await _send_qa_answer(qa_result)
 
 
-# ── 추천 질문 버튼 클릭 ────────────────────────────────────
+# ── 추천 질문 버튼 클릭 ───────────────────────────────────────────────
 @cl.action_callback("followup")
 async def on_followup(action: cl.Action):
     question   = action.payload["value"]
@@ -392,5 +368,6 @@ async def on_followup(action: cl.Action):
         return
 
     await cl.Message(content=question, author="user").send()
-    qa_result = await asyncio.to_thread(ask, question, summary, raw_chunks, None, doc_id)
+    # ask()는 async def — 직접 await (to_thread 제거)
+    qa_result = await ask(question, summary, raw_chunks, None, doc_id)
     await _send_qa_answer(qa_result)
