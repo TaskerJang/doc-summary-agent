@@ -25,7 +25,6 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
     """
 
     async def get_user(self, identifier: str):
-        # 인증 통과를 위해 항상 유효한 PersistedUser 반환
         return PersistedUser(
             id=identifier,
             identifier=identifier,
@@ -65,7 +64,7 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
     async def get_thread(self, thread_id): return None
     async def get_thread_author(self, thread_id): return ""
     async def delete_thread(self, thread_id): pass
-    async def list_threads(self, pagination, filters): return []
+    async def list_threads(self, pagination, filters): return None  # [] 안 됨
     async def get_element(self, thread_id, element_id): return None
     async def create_element(self, element): pass
     async def delete_element(self, element_id, thread_id=None): pass
@@ -76,7 +75,7 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
     async def delete_feedback(self, feedback_id): return True
     async def build_debug_url(self) -> str: return ""
     async def close(self): pass
-    async def get_favorite_steps(self): return []
+    async def get_favorite_steps(self): return None
 
 
 cl_data._data_layer = FeedbackOnlyDataLayer()
