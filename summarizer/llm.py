@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 # ── 상수 ──────────────────────────────────────────────────
 MODEL          = "gpt-5.2"
 TIMEOUT        = 30
-MAX_CONCURRENT = 8   # Semaphore 상한 (rate limit 대응)
+# chunk_size=700 기준 청크 수 감소 → Semaphore 상한도 16으로 상향
+# rate limit 여유가 있으면 더 올릴 수 있음
+MAX_CONCURRENT = 16
 PROMPTS_DIR         = Path(__file__).parent / "prompts"
 SYSTEM_PROMPT_PATH  = PROMPTS_DIR / "system_v1.md"
 OCR_WARNING_PATH    = PROMPTS_DIR / "ocr_warning_v1.md"
@@ -58,7 +60,6 @@ class SummaryResult(BaseModel):
 
 # ── 청크 수 → 불릿 수 결정 ────────────────────────────────
 def _resolve_bullet_count(chunk_count: int) -> int:
-    """청크 수에 따라 overall 요약의 불릿 수를 동적으로 결정한다."""
     if chunk_count <= 10:
         return 5
     elif chunk_count <= 25:
@@ -104,14 +105,14 @@ async def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | 
     template    = CHUNK_PROMPT_PATH.read_text(encoding="utf-8")
     user_prompt = template.format(section=section, text=text)
 
-    async with _get_sem():  # 동시 호출 수 제한
+    async with _get_sem():
         try:
             raw = await _call_api(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt},
                 ],
-                max_tokens=600,  # chart_spec 필드 추가로 500 → 600 상향
+                max_tokens=600,
             )
 
             raw = raw.strip()
@@ -119,14 +120,12 @@ async def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | 
                 logger.warning("청크 요약 빈 응답 (section=%r)", section)
                 return None
 
-            # 마크다운 코드블록 제거
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
                 raw = raw.strip()
 
-            # JSON 파싱 — 실패 시 작은따옴표 이스케이프 후 재시도
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
@@ -135,7 +134,6 @@ async def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | 
                 )
                 data = json.loads(raw_fixed)
 
-            # chart_spec이 없거나 chart_type=none이면 None으로 정규화
             chart_spec = data.get("chart_spec")
             if isinstance(chart_spec, dict):
                 if str(chart_spec.get("chart_type", "none")).lower() == "none":
@@ -148,7 +146,7 @@ async def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | 
 
         except Exception as e:
             logger.warning("청크 요약 실패 (section=%r): %s", section, e)
-            return None  # graceful fallback — 전체 중단 없음
+            return None
 
 
 # ── Reduce 단계: 섹션 요약 → 전체 요약 ────────────────────
@@ -183,7 +181,6 @@ async def _summarize_overall(
             logger.warning("전체 요약 빈 응답 — 첫 섹션 불릿으로 대체")
             return sections[0].bullets[0] if sections and sections[0].bullets else "[전체 요약 생성 실패]"
 
-        # ~~/~ 모두 "에서"로 치환
         result = re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1에서 \2', result)
         return result
 
@@ -194,21 +191,11 @@ async def _summarize_overall(
 
 # ── 공개 인터페이스 ────────────────────────────────────────
 async def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult:
-    """
-    청크 배열을 받아 전체 요약 및 섹션별 요약을 반환한다.
-
-    청크 요약은 asyncio.gather() + Semaphore로 병렬 처리한다. (이슈 #68)
-    - 순서 보장: gather()는 입력 순서대로 결과를 반환한다.
-    - Rate limit 대응: Semaphore(MAX_CONCURRENT)로 동시 호출 수를 제한한다.
-    - Graceful fallback: 개별 청크 실패 시 None 반환, 전체 중단 없음.
-    각 SectionSummary에는 chart_spec이 포함될 수 있다 (이슈 #60).
-    """
     chunk_count = len(chunks)
     logger.info("요약 시작 — 청크 %d개  is_image_based=%s", chunk_count, is_image_based)
 
     system_prompt = _load_system_prompt(is_image_based)
 
-    # Map: asyncio.gather로 청크 요약 병렬 실행 (순서 보장)
     raw_results: list[SectionSummary | None] = await asyncio.gather(
         *[_summarize_chunk(c, system_prompt) for c in chunks]
     )
@@ -222,7 +209,6 @@ async def summarize(chunks: list[dict], is_image_based: bool = False) -> Summary
             is_image_based=is_image_based,
         )
 
-    # Reduce: 전체 핵심 요약 (청크 수 기반 불릿 수 동적 결정)
     overall = await _summarize_overall(sections, system_prompt, chunk_count)
 
     chart_count = sum(1 for s in sections if s.chart_spec is not None)
