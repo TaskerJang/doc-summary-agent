@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from chunker.chunker import chunk, _semantic_split, KOREAN_SENTENCE_SPLIT_REGEX
+from chunker.chunker import chunk, _semantic_split
 
 # ── 공통 픽스처 ────────────────────────────────────────────────────────────────
 
@@ -63,6 +63,13 @@ COMPLIANCE_SECTION = """## compliance 안내
 
 HEADING_DOC = SHORT_SECTION + "\n" + TABLE_SECTION + "\n" + COMPLIANCE_SECTION
 
+# T-02 전용: heading 없는 텍스트 — 각 단락이 min_chunk_size(50자) 이상이어야 skip 안 됨
+NO_HEADING_TEXT = (
+    "첫 번째 단락입니다. 2023년 영업이익은 1,200억 원으로 전년 대비 15% 증가했습니다.\n\n"
+    "두 번째 단락입니다. 리테일 뱅킹 부문이 전체 수익의 42%를 차지하며 성장 중입니다.\n\n"
+    "세 번째 단락입니다. 자산 관리 부문은 펀드 운용 보수로 수익을 구성하며 고성장 중입니다."
+)
+
 
 # ── 테스트 함수 ────────────────────────────────────────────────────────────────
 
@@ -76,10 +83,16 @@ def test_t01_empty_input():
 
 
 def test_t02_no_heading_fallback():
-    """T-02: heading 없는 텍스트 → \\n\\n 단락 기준 fallback 분리"""
-    text = "첫 번째 단락입니다.\n\n두 번째 단락입니다.\n\n세 번째 단락입니다."
-    result = chunk(text, chunk_size=500)
-    assert len(result) >= 1, "최소 1개 청크 기대"
+    """T-02: heading 없는 텍스트 → \\n\\n 단락 기준 fallback 분리
+    
+    주의: 각 단락이 min_chunk_size(50자) 이상이어야 청크로 추가됨.
+    픽스처 NO_HEADING_TEXT는 각 단락 50자 이상으로 구성.
+    """
+    result = chunk(NO_HEADING_TEXT, chunk_size=500)
+    assert len(result) >= 1, (
+        f"최소 1개 청크 기대. "
+        f"단락 길이 확인: {[len(p) for p in NO_HEADING_TEXT.split(chr(10)*2)]}"
+    )
     assert all("text" in c for c in result), "모든 청크에 text 키 존재"
     print(f"  ✅ T-02 통과 ({len(result)}개 청크)")
 
@@ -113,7 +126,6 @@ def test_t05_skip_compliance():
 def test_t06_short_section_single_chunk():
     """T-06: chunk_size 이하 섹션 → 분할 없이 1청크"""
     result = chunk(SHORT_SECTION, chunk_size=500)
-    # 표 아니고 본문인 청크만
     text_chunks = [c for c in result if c["chunk_type"] == "text"]
     assert len(text_chunks) == 1, f"1청크 기대, got {len(text_chunks)}"
     print("  ✅ T-06 통과")
@@ -121,7 +133,6 @@ def test_t06_short_section_single_chunk():
 
 def test_t07_long_section_fallback():
     """T-07: chunk_size 초과 + SemanticChunker 강제 실패 → MarkdownTextSplitter fallback"""
-    # SemanticChunker를 항상 실패하도록 패치
     with patch("chunker.chunker._get_semantic_splitter", return_value=None):
         result = chunk(LONG_SECTION, chunk_size=300, chunk_overlap=50)
     text_chunks = [c for c in result if c["chunk_type"] == "text"]
@@ -143,8 +154,7 @@ def test_t09_chunk_index_sequential():
     """T-09: chunk_index가 0부터 연속 부여"""
     result = chunk(HEADING_DOC, chunk_size=300)
     indices = [c["chunk_index"] for c in result]
-    assert indices == list(range(len(result))), \
-        f"순번 불일치: {indices}"
+    assert indices == list(range(len(result))), f"순번 불일치: {indices}"
     print(f"  ✅ T-09 통과 (총 {len(result)}개, index 0~{len(result)-1})")
 
 
