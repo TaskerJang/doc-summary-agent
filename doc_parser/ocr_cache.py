@@ -4,6 +4,7 @@ from pathlib import Path
 
 import easyocr
 import fitz
+import numpy as np
 
 CACHE_DIR = Path(".ocr_cache")
 CACHE_DIR.mkdir(exist_ok=True)
@@ -31,6 +32,19 @@ def _page_cache_path(pdf_hash: str, page_index: int) -> Path:
     return CACHE_DIR / f"{pdf_hash}_p{page_index}.json"
 
 
+def _pix_to_numpy(pix: fitz.Pixmap) -> np.ndarray:
+    """
+    fitz.Pixmap → numpy uint8 array (H, W, C).
+    cv2.imdecode 경로를 완전히 우회하기 위해 직접 변환.
+    - RGBA(4ch) pixmap은 RGB(3ch)로 축소
+    """
+    samples = np.frombuffer(pix.samples, dtype=np.uint8)
+    img = samples.reshape((pix.height, pix.width, pix.n))
+    if pix.n == 4:          # RGBA → RGB
+        img = img[:, :, :3]
+    return img
+
+
 def extract_text_with_cache(pdf_path: Path) -> list[str]:
     """
     PDF 전체 페이지 OCR 결과를 캐시에서 반환.
@@ -41,6 +55,7 @@ def extract_text_with_cache(pdf_path: Path) -> list[str]:
     변경 이력:
     - EasyOCR dpi=150 → dpi=300 상향 (정확도 개선)
     - PaddleOCR v3 시도했으나 Windows CPU 환경 미지원으로 EasyOCR 유지
+    - cv2.imdecode AttributeError 우회: bytes → numpy array 직접 변환
     """
     pdf_path = Path(pdf_path)
     h = _pdf_hash(pdf_path)
@@ -59,8 +74,8 @@ def extract_text_with_cache(pdf_path: Path) -> list[str]:
         print(f"  p{i + 1}/{len(doc)} 처리 중...", end="\r")
 
         pix = page.get_pixmap(dpi=300)
-        img_bytes = pix.tobytes("png")
-        lines = reader.readtext(img_bytes, detail=0)
+        img_np = _pix_to_numpy(pix)
+        lines = reader.readtext(img_np, detail=0)
         pages_text.append("\n".join(lines))
 
     print(f"\n[OCR] 완료 — 캐시 저장: {cache}")
@@ -96,8 +111,8 @@ def extract_page_with_cache(pdf_path: Path, page_index: int) -> str:
         return ""
 
     pix = doc[page_index].get_pixmap(dpi=300)
-    img_bytes = pix.tobytes("png")
-    lines = reader.readtext(img_bytes, detail=0)
+    img_np = _pix_to_numpy(pix)
+    lines = reader.readtext(img_np, detail=0)
     text = "\n".join(lines)
 
     cache.write_text(json.dumps(text, ensure_ascii=False), encoding="utf-8")
