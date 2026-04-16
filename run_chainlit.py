@@ -19,10 +19,8 @@ FEEDBACK_FILE = Path("./feedback_log.jsonl")
 class FeedbackOnlyDataLayer(BaseDataLayer):
     """
     #69 Human Feedback 전용 미니 data layer.
-
-    SQLAlchemyDataLayer 대신 사용 — 인증/thread/step 저장 없이
-    upsert_feedback()만 구현해 401 문제 우회.
-    피드백은 JSONL 파일로 저장 (진단/분석 지원).
+    upsert_feedback()만 구현, 나머지는 no-op.
+    피드백은 feedback_log.jsonl로 저장.
     """
 
     async def upsert_feedback(self, feedback: Feedback) -> str:
@@ -30,7 +28,7 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
             "id":       feedback.id,
             "forId":    feedback.forId,
             "threadId": getattr(feedback, "threadId", None),
-            "value":    feedback.value,   # 1=👍, 0=👎
+            "value":    feedback.value,
             "comment":  getattr(feedback, "comment", None),
         }
         emoji = "👍" if feedback.value == 1 else "👎"
@@ -46,7 +44,7 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
             logger.warning("[Feedback] 파일 저장 실패: %s", e)
         return feedback.id or ""
 
-    # 필수 추상 메서드 스트난 구현 (아무것도 안 함)
+    # 필수 추상 메서드 스튱 (no-op)
     async def get_user(self, identifier: str): return None
     async def create_user(self, user): return None
     async def update_thread(self, thread_id, name=None, user_id=None,
@@ -63,9 +61,12 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
     async def delete_step(self, step_id): pass
     async def get_all_user_threads(self, user_id=None, thread_id=None): return None
     async def delete_feedback(self, feedback_id): return True
+    # Chainlit 2.11 추가 추상 메서드
+    async def build_debug_url(self) -> str: return ""
+    async def close(self): pass
+    async def get_favorite_steps(self): return []
 
 
-# data layer 주입 — 인증 없이 피드백만 수집
 cl_data._data_layer = FeedbackOnlyDataLayer()
 
 from ui.app import *  # noqa: F401, F403
