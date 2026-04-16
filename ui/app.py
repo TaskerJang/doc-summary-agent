@@ -135,6 +135,27 @@ async def _render_charts(summary: SummaryResult) -> None:
         logger.info("차트 렌더링 완료 — %d개", rendered)
 
 
+def _index_in_background(chunks: list[dict], doc_id: str) -> None:
+    """별도 스레드에서 인덱싱 실행 (fire-and-forget).
+
+    bge-m3는 CPU 연산으로 GIL을 잡으므로 asyncio.to_thread로 감싸도
+    이벤트 루프를 블로킹함. 따라서 threading.Thread로 완전히 분리하여
+    이벤트 루프와 독립적으로 실행한다.
+    """
+    import threading
+
+    def _run():
+        try:
+            from summarizer.embedder import index_chunks
+            index_chunks(chunks, doc_id)
+            logger.info("백그라운드 인덱싱 완료: %s", doc_id)
+        except Exception as e:
+            logger.warning("백그라운드 인덱싱 실패: %s", e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("result", None)
@@ -203,22 +224,15 @@ async def on_message(message: cl.Message):
         chunks      = step2.get("chunks", [])
         raw_chunks  = [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
 
-        await cl.Message(content=f"⏳ **Step 4** · 요약 생성 중... ({chunk_count}개 청크)").send()
+        await cl.Message(content=f"⏳ **Step 3** · 요약 생성 중... ({chunk_count}개 청크)").send()
 
-        # Step 4: 요약만 먼저 (index_chunks는 bge-m3 GIL 때문에 gather 불가)
+        # Step 3: 요약 (LLM — asyncio 기반이므로 이벤트 루프 친화적)
         logger.info("요약 시작")
         step3 = await run_step3(step2)
-        logger.info("요약 완료, 인덱싱 시작")
+        logger.info("요약 완료")
 
-        # Step 3: 인덱싱 순차 실행
-        final_doc_id = filename
-        try:
-            from summarizer.embedder import index_chunks
-            await asyncio.to_thread(index_chunks, chunks, filename)
-        except Exception as e:
-            logger.warning("인덱싱 실패 (BM25 fallback): %s", e)
-
-        logger.info("인덱싱 완료")
+        # 인덱싱: threading.Thread로 완전히 분리 (bge-m3 GIL 블로킹 방지)
+        _index_in_background(chunks, filename)
 
         summary_dict  = step3.get("summary", {})
         section_count = len(summary_dict.get("sections", []))
@@ -226,7 +240,7 @@ async def on_message(message: cl.Message):
 
         cl.user_session.set("result", step3)
         cl.user_session.set("raw_chunks", raw_chunks)
-        cl.user_session.set("doc_id", final_doc_id)
+        cl.user_session.set("doc_id", filename)
         summary = _to_summary_result(step3)
 
         # 전체 요약
