@@ -118,18 +118,6 @@ async def _send_qa_answer(qa_result) -> None:
 async def _render_charts(summary: SummaryResult) -> None:
     """
     SummaryResult의 각 섹션에서 chart_spec을 추출해 cl.Plotly()로 렌더링한다.
-
-    크기 정책 (CHART_SIZE):
-      - Chainlit cl.Plotly의 size 파라미터 사용 ("small" | "medium" | "large").
-      - Figure의 height px는 Chainlit 컨테이너(h-[400px] 하드코딩)에 의해
-        무시되므로, size 파라미터로 컨테이너 자체를 제어하는 것이 올바른 방식.
-      - 근거: Chainlit 공식 문서 + GitHub Issue #1919.
-
-    상한선 정책 (MAX_CHARTS_PER_DOC):
-      - 문서 전체에서 최대 MAX_CHARTS_PER_DOC개만 렌더링한다.
-      - 근거: MIT Sloan 금융 시각화 best practice — 보고서당 4~6개 이하 권장.
-
-    chart_route()가 None을 반환하면 해당 섹션은 조용히 건너뜀 (graceful fallback).
     """
     rendered = 0
 
@@ -260,8 +248,8 @@ async def on_message(message: cl.Message):
         task4.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # ── Step 4: 요약 생성 ──────────────────────────────
-        step3 = await asyncio.to_thread(run_step3, step2)
+        # ── Step 4: 요약 생성 (async 직접 호출 — to_thread 불필요) ──
+        step3 = await run_step3(step2)
 
         summary_dict  = step3.get("summary", {})
         section_count = len(summary_dict.get("sections", []))
