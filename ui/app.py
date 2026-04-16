@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 MAX_CHARTS_PER_DOC = 5
 CHART_SIZE = "small"
-CHART_SEND_TIMEOUT = 5  # 차트 1개당 전송 타임아웃 (초) — blob_storage 없을 때 블로킹 방지
+CHART_SEND_TIMEOUT = 5  # 차트 1개당 전송 타임아웃 (초)
 
 # ── #69 Password 인증 ─────────────────────────────────────────────────────────
 _APP_USERNAME = os.getenv("APP_USERNAME", "admin")
@@ -71,6 +71,20 @@ def _fmt(value, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
+async def _stream(msg: cl.Message, text: str) -> None:
+    """텍스트를 줄 단위로 스트리밍한다.
+
+    한 글자씩 stream_token 하면 await가 수천 번 발생해 블로킹되므로
+    줄(\n) 단위로 전송해 await 횟수를 수십 번으로 줄인다.
+    스트리밍 효과(타이핑 느낌)는 유지된다.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        await msg.stream_token(line)
+        if i < len(lines) - 1:
+            await msg.stream_token("\n")
+
+
 def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     if not summary:
         defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
@@ -90,14 +104,12 @@ async def _send_qa_answer(qa_result) -> None:
     await msg.send()
 
     if not qa_result.is_answerable:
-        for ch in f"⚠️ {qa_result.answer}":
-            await msg.stream_token(ch)
+        await _stream(msg, f"⚠️ {qa_result.answer}")
         await msg.update()
         return
 
     answer = _fix_tilde(qa_result.answer)
-    for ch in answer:
-        await msg.stream_token(ch)
+    await _stream(msg, answer)
 
     if qa_result.sources:
         lines = []
@@ -342,8 +354,7 @@ async def on_message(message: cl.Message):
             msg     = cl.Message(content="")
             await msg.send()
             await msg.stream_token("📄 **전체 요약**\n\n")
-            for ch in overall:
-                await msg.stream_token(ch)
+            await _stream(msg, overall)
             await msg.update()
         else:
             await cl.Message(content="⚠️ 전체 요약을 생성하지 못했습니다.").send()
