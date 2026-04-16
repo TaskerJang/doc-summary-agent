@@ -1,6 +1,7 @@
 import sys
 import json
 import logging
+import asyncio
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -122,9 +123,10 @@ def run_step2(
 
     return result
 
-def run_step3(step2_result: dict) -> dict:
+
+async def run_step3(step2_result: dict) -> dict:
     """
-    Step 3: LLM 요약 생성
+    Step 3: LLM 요약 생성 (async — summarize()가 async이므로 await 필요)
     Returns: step2_result + { summary, summary_error }
     """
     result = dict(step2_result)
@@ -133,7 +135,7 @@ def run_step3(step2_result: dict) -> dict:
     logger.info("Step 3 시작 — 요약 생성")
 
     try:
-        summary: SummaryResult = summarize(chunks, is_image_based=is_image_based)
+        summary: SummaryResult = await summarize(chunks, is_image_based=is_image_based)
         result["summary"] = summary.model_dump()
         logger.info("요약 완료 — 섹션 %d개", len(summary.sections))
     except Exception as e:
@@ -153,7 +155,7 @@ def run_step3(step2_result: dict) -> dict:
 
 # ── 기존 run() — CLI 및 하위 호환 유지 ────────────────────
 
-def run(path: Path, no_summary: bool = False) -> dict:
+async def run(path: Path, no_summary: bool = False) -> dict:
     started_at = datetime.now()
     logger.info("파이프라인 시작: %s", path.name)
 
@@ -186,7 +188,7 @@ def run(path: Path, no_summary: bool = False) -> dict:
         return result
 
     print(f"\n{SEP}\n[Step 3] 요약 생성\n{SEP}")
-    result = run_step3(result)
+    result = await run_step3(result)
 
     summary = result.get("summary", {})
     print(f"  전체 요약   {len(summary.get('overall', ''))}자")
@@ -210,7 +212,7 @@ def main() -> None:
         logger.error("파일 없음: %s", path)
         sys.exit(1)
 
-    result = run(path, no_summary=args.no_summary)
+    result = asyncio.run(run(path, no_summary=args.no_summary))
 
     if args.json:
         output = {k: v for k, v in result.items() if k not in ("chunks", "text", "clean_text")}
