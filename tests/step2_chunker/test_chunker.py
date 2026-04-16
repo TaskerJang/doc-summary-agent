@@ -1,5 +1,5 @@
 """
-chunker.py 단위 테스트 — 이슈 #59 SemanticChunking
+chunker.py 단위 테스트 — 이슈 #59 SemanticChunking + #75 메타데이터 enrichment
 
 실행 방법:
     uv run python tests/step2_chunker/test_chunker.py
@@ -7,7 +7,6 @@ chunker.py 단위 테스트 — 이슈 #59 SemanticChunking
 테스트 구성:
     - bge-m3 모델 불필요 (SemanticChunker를 Mock으로 우회)
     - 모든 케이스는 fallback(MarkdownTextSplitter) 또는 순수 로직만 검증
-    - SemanticChunker 실제 동작은 test_chunker_semantic.py(로컬 전용)에서 별도 확인
 
 검증 항목:
     T-01: 빈 텍스트 입력 → 빈 리스트 반환
@@ -20,6 +19,10 @@ chunker.py 단위 테스트 — 이슈 #59 SemanticChunking
     T-08: 단문 섹션(2문장) → _semantic_split()이 [] 반환 (IndexError 방어)
     T-09: chunk_index 순번 연속 부여
     T-10: chunk_type 필드 존재 확인 (#75 선행 확장)
+    T-11: doc_year — 본문 연도 추출 정확도
+    T-12: section_type — 섹션 유형 분류 정확도
+    T-13: metrics — 금융 지표 키워드 추출
+    T-14: 메타데이터 필드 모두 존재 + 타입 유효성
 """
 import sys
 from pathlib import Path
@@ -27,7 +30,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from chunker.chunker import chunk, _semantic_split
+from chunker.chunker import (
+    chunk,
+    _semantic_split,
+    _extract_doc_year,
+    _extract_section_type,
+    _extract_metrics,
+)
 
 # ── 공통 픽스처 ────────────────────────────────────────────────────────────────
 
@@ -45,7 +54,7 @@ LONG_SECTION = """## 사업 개요
 자산 관리 부문은 펀드 운용 보수 및 투자 자문 수수료로 수익을 구성하며 고성장 중입니다.
 리스크 관리 체계는 Basel III 기준을 준수하며 BIS 비율은 15.2%로 양호한 수준입니다.
 향후 전략은 디지털 전환 가속화와 해외 시장 진출 확대를 두 축으로 설정했습니다.
-""" * 3  # 300자 확실히 초과
+""" * 3
 
 TABLE_SECTION = """## 재무 현황
 
@@ -63,7 +72,6 @@ COMPLIANCE_SECTION = """## compliance 안내
 
 HEADING_DOC = SHORT_SECTION + "\n" + TABLE_SECTION + "\n" + COMPLIANCE_SECTION
 
-# T-02 전용: heading 없는 텍스트 — 각 단락이 min_chunk_size(50자) 이상이어야 skip 안 됨
 NO_HEADING_TEXT = (
     "첫 번째 단락입니다. 2023년 영업이익은 1,200억 원으로 전년 대비 15% 증가했습니다.\n\n"
     "두 번째 단락입니다. 리테일 뱅킹 부문이 전체 수익의 42%를 차지하며 성장 중입니다.\n\n"
@@ -71,7 +79,7 @@ NO_HEADING_TEXT = (
 )
 
 
-# ── 테스트 함수 ────────────────────────────────────────────────────────────────
+# ── 기존 테스트 (T-01 ~ T-10) ─────────────────────────────────────────────────
 
 def test_t01_empty_input():
     """T-01: 빈 텍스트 입력 → 빈 리스트 반환"""
@@ -83,11 +91,7 @@ def test_t01_empty_input():
 
 
 def test_t02_no_heading_fallback():
-    """T-02: heading 없는 텍스트 → \\n\\n 단락 기준 fallback 분리
-    
-    주의: 각 단락이 min_chunk_size(50자) 이상이어야 청크로 추가됨.
-    픽스처 NO_HEADING_TEXT는 각 단락 50자 이상으로 구성.
-    """
+    """T-02: heading 없는 텍스트 → \\n\\n 단락 기준 fallback 분리"""
     result = chunk(NO_HEADING_TEXT, chunk_size=500)
     assert len(result) >= 1, (
         f"최소 1개 청크 기대. "
@@ -159,13 +163,76 @@ def test_t09_chunk_index_sequential():
 
 
 def test_t10_chunk_type_field_exists():
-    """T-10: chunk_type 필드가 모든 청크에 존재하고 유효한 값 (#75 선행 확장)"""
+    """T-10: chunk_type 필드가 모든 청크에 존재하고 유효한 값"""
     result = chunk(HEADING_DOC, chunk_size=300)
     for c in result:
         assert "chunk_type" in c, f"chunk_type 필드 없음: {c}"
         assert c["chunk_type"] in ("text", "table"), \
             f"유효하지 않은 chunk_type: {c['chunk_type']}"
     print(f"  ✅ T-10 통과 (전체 {len(result)}개 청크 chunk_type 검증)")
+
+
+# ── #75 신규 테스트 (T-11 ~ T-14) ─────────────────────────────────────────────
+
+def test_t11_doc_year_extraction():
+    """T-11: doc_year — 본문 내 연도 추출 정확도"""
+    # 단일 연도
+    assert _extract_doc_year("", "2023년 영업이익은 1,200억 원입니다.") == "2023"
+    # 최빈 연도 (2023이 2번, 2024가 1번)
+    assert _extract_doc_year("", "2023년 실적과 2023년 비교 및 2024년 전망") == "2023"
+    # 동율 시 최신 연도
+    assert _extract_doc_year("", "2022년과 2023년 비교") == "2023"
+    # 섹션 제목에 연도 있는 경우
+    assert _extract_doc_year("## 2024년 사업계획", "전략 방향을 설명합니다.") == "2024"
+    # 연도 없음
+    assert _extract_doc_year("", "영업이익이 증가했습니다.") is None
+    print("  ✅ T-11 통과")
+
+
+def test_t12_section_type_classification():
+    """T-12: section_type — 섹션 유형 분류 정확도"""
+    assert _extract_section_type("## 실적 요약", "") == "실적"
+    assert _extract_section_type("", "매출액 9,400억 원 기록") == "실적"
+    assert _extract_section_type("## 리스크 요인", "") == "리스크"
+    assert _extract_section_type("", "불확실한 시장 환경으로 인한 위험 요소") == "리스크"
+    assert _extract_section_type("## 향후 전망", "") == "전망"
+    assert _extract_section_type("", "성장 전략 및 로드맵 방향") == "전망"
+    # 매칭 없음 → None
+    assert _extract_section_type("## 회사 개요", "설립 연혁 및 주요 연혁") is None
+    print("  ✅ T-12 통과")
+
+
+def test_t13_metrics_extraction():
+    """T-13: metrics — 금융 지표 키워드 추출 + 중복 없음"""
+    text = "영업이익 1,200억, 매출 9,400억, ROE 12.3%, 영업이익 증가세 지속"
+    result = _extract_metrics(text)
+    assert "영업이익" in result
+    assert "매출" in result
+    assert "ROE" in result
+    # 중복 없음 확인
+    assert len(result) == len(set(result)), f"중복 지표 존재: {result}"
+    # 없는 지표는 포함 안 됨
+    assert "EPS" not in result
+    print(f"  ✅ T-13 통과 (추출 지표: {result})")
+
+
+def test_t14_metadata_fields_all_present():
+    """T-14: 모든 청크에 #75 메타데이터 필드 존재 + 타입 유효성"""
+    result = chunk(HEADING_DOC, chunk_size=300)
+    assert len(result) > 0, "청크가 없어 검증 불가"
+    for c in result:
+        # 필드 존재 확인
+        assert "doc_year" in c, f"doc_year 필드 없음: {c['section']}"
+        assert "section_type" in c, f"section_type 필드 없음: {c['section']}"
+        assert "metrics" in c, f"metrics 필드 없음: {c['section']}"
+        # 타입 유효성
+        assert c["doc_year"] is None or isinstance(c["doc_year"], str), \
+            f"doc_year 타입 오류: {type(c['doc_year'])}"
+        assert c["section_type"] is None or c["section_type"] in ("실적", "리스크", "전망"), \
+            f"section_type 유효하지 않은 값: {c['section_type']}"
+        assert isinstance(c["metrics"], list), \
+            f"metrics 타입 오류: {type(c['metrics'])}"
+    print(f"  ✅ T-14 통과 (전체 {len(result)}개 청크 메타데이터 필드 검증)")
 
 
 # ── 실행 ───────────────────────────────────────────────────────────────────────
@@ -182,10 +249,14 @@ if __name__ == "__main__":
         test_t08_short_text_semantic_skip,
         test_t09_chunk_index_sequential,
         test_t10_chunk_type_field_exists,
+        test_t11_doc_year_extraction,
+        test_t12_section_type_classification,
+        test_t13_metrics_extraction,
+        test_t14_metadata_fields_all_present,
     ]
 
     print("\n" + "=" * 60)
-    print("🧩 chunker.py 단위 테스트 — #59 SemanticChunking")
+    print("🧩 chunker.py 단위 테스트 — #59 SemanticChunking + #75 메타데이터 enrichment")
     print("=" * 60)
 
     passed = 0
@@ -203,6 +274,6 @@ if __name__ == "__main__":
     print(f"결과: {passed}/{len(tests)} 통과")
     print("=" * 60)
     if passed == len(tests):
-        print("\n✅ 전체 통과 — PR #76 머지 가능")
+        print("\n✅ 전체 통과 — PR 머지 가능")
     else:
         print("\n❌ 실패 항목 확인 후 머지하세요")
