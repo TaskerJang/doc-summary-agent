@@ -67,9 +67,10 @@ def _fmt(value, suffix: str = "") -> str:
 
 async def _stream(msg: cl.Message, text: str) -> None:
     """줄 단위 스트리밍."""
-    for i, line in enumerate(text.split("\n")):
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
         await msg.stream_token(line)
-        if i < len(text.split("\n")) - 1:
+        if i < len(lines) - 1:
             await msg.stream_token("\n")
 
 
@@ -187,7 +188,7 @@ async def on_message(message: cl.Message):
             await cl.Message(content=f"❌ 파싱 실패: {step1.get('parse_error', '오류')}").send()
             return
 
-        meta      = step1.get("metadata", {})
+        meta       = step1.get("metadata", {})
         page_count = _fmt(meta.get("page_count"), "페이지")
         clean_len  = f"{step1.get('clean_len', 0):,}자"
         await cl.Message(content=f"⏳ **Step 2** · 청킹 중... ({page_count} · {clean_len})").send()
@@ -202,22 +203,22 @@ async def on_message(message: cl.Message):
         chunks      = step2.get("chunks", [])
         raw_chunks  = [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
 
-        await cl.Message(content=f"⏳ **Step 3+4** · 벡터 인덱싱 + 요약 생성 중... ({chunk_count}개 청크)").send()
+        await cl.Message(content=f"⏳ **Step 4** · 요약 생성 중... ({chunk_count}개 청크)").send()
 
-        # Step 3+4 병렬
-        logger.info("asyncio.gather 시작")
+        # Step 4: 요약만 먼저 (index_chunks는 bge-m3 GIL 때문에 gather 불가)
+        logger.info("요약 시작")
+        step3 = await run_step3(step2)
+        logger.info("요약 완료, 인덱싱 시작")
+
+        # Step 3: 인덱싱 순차 실행
+        final_doc_id = filename
         try:
             from summarizer.embedder import index_chunks
-            final_doc_id, step3 = await asyncio.gather(
-                asyncio.to_thread(index_chunks, chunks, filename),
-                run_step3(step2),
-            )
+            await asyncio.to_thread(index_chunks, chunks, filename)
         except Exception as e:
-            logger.warning("인덱싱 실패 (fallback): %s", e)
-            step3 = await run_step3(step2)
-            final_doc_id = None
+            logger.warning("인덱싱 실패 (BM25 fallback): %s", e)
 
-        logger.info("asyncio.gather 완료")
+        logger.info("인덱싱 완료")
 
         summary_dict  = step3.get("summary", {})
         section_count = len(summary_dict.get("sections", []))
@@ -225,7 +226,7 @@ async def on_message(message: cl.Message):
 
         cl.user_session.set("result", step3)
         cl.user_session.set("raw_chunks", raw_chunks)
-        cl.user_session.set("doc_id", final_doc_id or filename)
+        cl.user_session.set("doc_id", final_doc_id)
         summary = _to_summary_result(step3)
 
         # 전체 요약
