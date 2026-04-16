@@ -1,7 +1,7 @@
 """
 ui/app.py
 Chainlit UI 진입점 — ChatGPT 스타일
-파일 업로드 → 진행 상태 메시지 → 전체 요약 → 섹션별 차트(cl.Plotly) → PDF 원문 → 추천 질문 → Q&A
+파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → PDF 원문 → 추천 질문 → Q&A
 """
 import asyncio
 import logging
@@ -67,15 +67,6 @@ def _fmt(value, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
-async def _stream(msg: cl.Message, text: str) -> None:
-    """줄 단위 스트리밍."""
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        await msg.stream_token(line)
-        if i < len(lines) - 1:
-            await msg.stream_token("\n")
-
-
 def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     if not summary:
         defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
@@ -90,18 +81,28 @@ def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
 async def _send_qa_answer(qa_result) -> None:
     msg = cl.Message(content="")
     await msg.send()
+
     if not qa_result.is_answerable:
-        await _stream(msg, f"⚠️ {qa_result.answer}")
+        for ch in f"⚠️ {qa_result.answer}":
+            await msg.stream_token(ch)
         await msg.update()
         return
-    await _stream(msg, _fix_tilde(qa_result.answer))
+
+    answer = _fix_tilde(qa_result.answer)
+    for ch in answer:
+        await msg.stream_token(ch)
+
     if qa_result.sources:
         lines = []
         for i, s in enumerate(qa_result.sources):
             section = _clean(s.section)
             snippet = s.snippet.strip() if s.snippet else ""
-            lines.append(f"`{i+1}` **{section}**" + (f" — {snippet}" if snippet else ""))
+            if snippet:
+                lines.append(f"`{i+1}` **{section}** — {snippet}")
+            else:
+                lines.append(f"`{i+1}` **{section}**")
         await msg.stream_token(f"\n\n---\n📌 **출처**\n" + "\n".join(lines))
+
     await msg.update()
 
 
@@ -122,6 +123,7 @@ async def _render_charts(summary: SummaryResult) -> None:
     rendered = 0
     for sec in summary.sections:
         if rendered >= max_charts:
+            logger.info("차트 상한선 도달 (%d개) — 이후 섹션 차트 생략", max_charts)
             break
         try:
             fig = chart_route(sec.chart_spec)
@@ -134,7 +136,7 @@ async def _render_charts(summary: SummaryResult) -> None:
         except Exception as e:
             logger.warning("차트 렌더링 실패 (section=%r): %s", sec.section, e)
     if rendered > 0:
-        logger.info("차트 렌더링 완료 — %d개", rendered)
+        logger.info("차트 렌더링 완료 — %d개 출력 (size=%s)", rendered, CHART_SIZE)
 
 
 def _index_in_background(chunks: list[dict], doc_id: str) -> None:
@@ -218,60 +220,95 @@ async def on_message(message: cl.Message):
             tmp_path.rename(new_path)
             tmp_path = new_path
 
+        doc_id = filename
+
+        task_list = cl.TaskList()
+        task_list.status = "분석 중..."
+        task1 = cl.Task(title="Step 1 · 파싱",           status=cl.TaskStatus.RUNNING)
+        task2 = cl.Task(title="Step 2 · 청킹",           status=cl.TaskStatus.READY)
+        task3 = cl.Task(title="Step 3 · 벡터 인덱스 생성", status=cl.TaskStatus.READY)
+        task4 = cl.Task(title="Step 4 · 요약 생성",       status=cl.TaskStatus.READY)
+        await task_list.add_task(task1)
+        await task_list.add_task(task2)
+        await task_list.add_task(task3)
+        await task_list.add_task(task4)
+        await task_list.send()
+
         # Step 1
-        await cl.Message(content="⏳ **Step 1** · 파싱 중...").send()
         step1 = await asyncio.to_thread(run_step1, tmp_path)
         if step1.get("status") == "error":
+            task1.status = cl.TaskStatus.FAILED
+            task1.title  = "Step 1 · 파싱 실패"
+            task_list.status = "실패"
+            await task_list.send()
             await cl.Message(content=f"❌ 파싱 실패: {step1.get('parse_error', '오류')}").send()
             return
 
         meta       = step1.get("metadata", {})
         page_count = _fmt(meta.get("page_count"), "페이지")
+        language   = _fmt(meta.get("language"))
         clean_len  = f"{step1.get('clean_len', 0):,}자"
-        await cl.Message(content=f"⏳ **Step 2** · 청킹 중... ({page_count} · {clean_len})").send()
+        task1.status = cl.TaskStatus.DONE
+        task1.title  = f"Step 1 · 파싱 완료 — {page_count} · {clean_len} · {language}"
+        task2.status = cl.TaskStatus.RUNNING
+        await task_list.send()
 
         # Step 2
         step2 = await asyncio.to_thread(run_step2, step1)
         if step2.get("status") == "error":
+            task2.status = cl.TaskStatus.FAILED
+            task2.title  = "Step 2 · 청킹 실패"
+            task_list.status = "실패"
+            await task_list.send()
             await cl.Message(content=f"❌ 청킹 실패: {step2.get('chunk_error', '오류')}").send()
             return
 
         chunk_count = step2.get("chunk_count", 0)
         chunks      = step2.get("chunks", [])
         raw_chunks  = [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
+        task2.status = cl.TaskStatus.DONE
+        task2.title  = f"Step 2 · 청킹 완료 — {chunk_count}개 청크"
+        task3.status = cl.TaskStatus.RUNNING
+        task4.status = cl.TaskStatus.RUNNING
+        await task_list.send()
 
-        await cl.Message(content=f"⏳ **Step 3** · 요약 생성 중... ({chunk_count}개 청크)").send()
-
-        # Step 3: 요약
-        logger.info("요약 시작")
-        step3 = await run_step3(step2)
-        logger.info("요약 완료")
-
-        # 인덱싱: 백그라운드 스레드 (bge-m3 GIL 블로킹 방지)
+        # Step 3: 인덱싱 백그라운드 + 요약 (핵심: bge-m3 GIL 블로킹 방지)
         _index_in_background(chunks, filename)
+        step3 = await run_step3(step2)
 
         summary_dict  = step3.get("summary", {})
         section_count = len(summary_dict.get("sections", []))
-        await cl.Message(content=f"✅ 분석 완료 — {chunk_count}개 청크 · {section_count}개 섹션").send()
+
+        task3.status = cl.TaskStatus.DONE
+        task3.title  = f"Step 3 · 벡터 인덱스 생성 중 (백그라운드)"
+        if step3.get("status") == "partial":
+            task4.status = cl.TaskStatus.FAILED
+            task4.title  = "Step 4 · 요약 실패"
+            task_list.status = "부분 완료"
+        else:
+            task4.status = cl.TaskStatus.DONE
+            task4.title  = f"Step 4 · 요약 완료 — {section_count}개 섹션"
+            task_list.status = "완료 ✓"
+        await task_list.send()
 
         cl.user_session.set("result", step3)
         cl.user_session.set("raw_chunks", raw_chunks)
-        cl.user_session.set("doc_id", filename)
+        cl.user_session.set("doc_id", doc_id)
         summary = _to_summary_result(step3)
 
         # 전체 요약
-        logger.info("전체 요약 스트리밍 시작")
         if summary and summary.overall and not summary.overall.startswith("["):
+            overall = _fix_tilde(summary.overall)
             msg = cl.Message(content="")
             await msg.send()
             await msg.stream_token("📄 **전체 요약**\n\n")
-            await _stream(msg, _fix_tilde(summary.overall))
+            for ch in overall:
+                await msg.stream_token(ch)
             await msg.update()
         else:
             await cl.Message(content="⚠️ 전체 요약을 생성하지 못했습니다.").send()
 
         # 차트
-        logger.info("차트 렌더링 시작")
         if summary:
             await _render_charts(summary)
 
