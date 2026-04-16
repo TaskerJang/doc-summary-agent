@@ -18,13 +18,10 @@ from summarizer.chart_router import route as chart_route
 
 logger = logging.getLogger(__name__)
 
-# ── 차트 상한선 기본값 (사용자가 ChatSettings로 덮어쓸 수 있음) ─
 MAX_CHARTS_PER_DOC = 5
-
 CHART_SIZE = "small"
 
 
-# ── 헬퍼: result dict → SummaryResult 복원 ───────────────────────────
 def _to_summary_result(result: dict) -> SummaryResult | None:
     summary_dict = result.get("summary")
     if not summary_dict:
@@ -37,13 +34,11 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
     )
 
 
-# ── 헬퍼: result dict → raw_chunks 텍스트 리스트 추출 ─────────────────
 def _to_raw_chunks(result: dict) -> list[str]:
     chunks = result.get("chunks", [])
     return [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
 
 
-# ── 헬퍼: 섹션명 정제 ────────────────────────────────────────────────
 def _clean(name: str) -> str:
     name = re.sub(r"^#+\s*", "", name)
     name = re.sub(r"\*+", "", name)
@@ -53,19 +48,16 @@ def _clean(name: str) -> str:
     return name
 
 
-# ── 헬퍼: ~~ 취소선 방지 ───────────────────────────────────────────────
 def _fix_tilde(text: str) -> str:
     return re.sub(r'(\d+\.?\d*)~+(\d+\.?\d*)', r'\1-\2', text)
 
 
-# ── 헬퍼: None 메타값 표시용 ──────────────────────────────────────────
 def _fmt(value, suffix: str = "") -> str:
     if value is None:
         return "-"
     return f"{value}{suffix}"
 
 
-# ── 추천 질문 생성 ───────────────────────────────────────────────────
 def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     if not summary:
         defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
@@ -80,7 +72,6 @@ def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     ]
 
 
-# ── Q&A 답변 전송 ─────────────────────────────────────────────────────
 async def _send_qa_answer(qa_result) -> None:
     msg = cl.Message(content="")
     await msg.send()
@@ -109,7 +100,6 @@ async def _send_qa_answer(qa_result) -> None:
     await msg.update()
 
 
-# ── 섹션별 차트 렌더링 ────────────────────────────────────────────────
 async def _render_charts(summary: SummaryResult) -> None:
     chart_enabled: bool = cl.user_session.get("chart_enabled", True)
     max_charts: int     = int(cl.user_session.get("max_charts", MAX_CHARTS_PER_DOC))
@@ -119,12 +109,10 @@ async def _render_charts(summary: SummaryResult) -> None:
         return
 
     rendered = 0
-
     for sec in summary.sections:
         if rendered >= max_charts:
             logger.info("차트 상한선 도달 (%d개) — 이후 섹션 차트 생략", max_charts)
             break
-
         try:
             fig = chart_route(sec.chart_spec)
             if fig is None:
@@ -149,18 +137,21 @@ async def _render_charts(summary: SummaryResult) -> None:
         logger.info("차트 렌더링 완료 — %d개 출력 (size=%s)", rendered, CHART_SIZE)
 
 
-# ── 벡터 인덱싱 래퍼 (TaskList 업데이트 포함) ─────────────────────
 async def _run_index(
-    raw_chunks: list[str],
+    chunks: list[dict],
     doc_id: str,
     task3: cl.Task,
     task_list: cl.TaskList,
 ) -> str | None:
+    """
+    벡터 인덱싱을 실행하고 task3 상태를 업데이트한다.
+    #75: raw_chunks(str) 대신 chunks(dict) 전달 — 메타데이터 payload 저장 포함.
+    """
     try:
         from summarizer.embedder import index_chunks
-        await asyncio.to_thread(index_chunks, raw_chunks, doc_id)
+        await asyncio.to_thread(index_chunks, chunks, doc_id)
         task3.status = cl.TaskStatus.DONE
-        task3.title  = f"Step 3 · 벡터 인덱스 완료 — {len(raw_chunks)}청크"
+        task3.title  = f"Step 3 · 벡터 인덱스 완료 — {len(chunks)}청크"
         await task_list.send()
         return doc_id
     except Exception as e:
@@ -171,7 +162,6 @@ async def _run_index(
         return None
 
 
-# ── 세션 시작 ─────────────────────────────────────────────────────────────
 @cl.on_chat_start
 async def on_chat_start():
     cl.user_session.set("result",     None)
@@ -206,7 +196,6 @@ async def on_chat_start():
     ).send()
 
 
-# ── ChatSettings 변경 훅 ─────────────────────────────────────────────────
 @cl.on_settings_update
 async def on_settings_update(settings: dict) -> None:
     cl.user_session.set("chart_enabled", settings["chart_enabled"])
@@ -218,7 +207,6 @@ async def on_settings_update(settings: dict) -> None:
     )
 
 
-# ── 파일 업로드 + Q&A 처리 ────────────────────────────────────────────
 @cl.on_message
 async def on_message(message: cl.Message):
 
@@ -279,7 +267,9 @@ async def on_message(message: cl.Message):
             await cl.Message(content=f"❌ 청킹 실패: {step2.get('chunk_error', '알 수 없는 오류')}").send()
             return
 
-        raw_chunks = _to_raw_chunks(step2)
+        # #75: 메타데이터 포함된 dict 청크 전체를 인덱서에 전달
+        chunks     = step2.get("chunks", [])
+        raw_chunks = [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
 
         task2.status = cl.TaskStatus.DONE
         task2.title  = f"Step 2 · 청킹 완료 — {step2.get('chunk_count', 0)}개 청크"
@@ -287,8 +277,9 @@ async def on_message(message: cl.Message):
         task4.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
+        # Step 3: chunks(dict) 전달 → 메타데이터 payload 포함 인덱싱
         final_doc_id, step3 = await asyncio.gather(
-            _run_index(raw_chunks, doc_id, task3, task_list),
+            _run_index(chunks, doc_id, task3, task_list),
             run_step3(step2),
         )
 
@@ -335,7 +326,7 @@ async def on_message(message: cl.Message):
         await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
         return
 
-    # ── 텍스트 질문 처리 (Q&A) ─────────────────────────────────────────
+    # 텍스트 질문 처리 (Q&A)
     result = cl.user_session.get("result")
     if not result:
         await cl.Message(content="먼저 문서를 업로드해 주세요.").send()
@@ -349,12 +340,10 @@ async def on_message(message: cl.Message):
     question   = message.content
     raw_chunks = cl.user_session.get("raw_chunks") or []
     doc_id     = cl.user_session.get("doc_id")
-    # ask()는 async def — 직접 await (to_thread 제거)
     qa_result  = await ask(question, summary, raw_chunks, None, doc_id)
     await _send_qa_answer(qa_result)
 
 
-# ── 추천 질문 버튼 클릭 ───────────────────────────────────────────────
 @cl.action_callback("followup")
 async def on_followup(action: cl.Action):
     question   = action.payload["value"]
@@ -368,6 +357,5 @@ async def on_followup(action: cl.Action):
         return
 
     await cl.Message(content=question, author="user").send()
-    # ask()는 async def — 직접 await (to_thread 제거)
     qa_result = await ask(question, summary, raw_chunks, None, doc_id)
     await _send_qa_answer(qa_result)

@@ -5,6 +5,7 @@
 - 청크 텍스트를 BAAI/bge-m3로 로컬 임베딩 (한국어 금융 문서 최적화)
 - Qdrant 로컬 인스턴스에 저장/검색
 - 세션별 컬렉션 격리 (collection_name = doc_id 해시)
+- #75: doc_year·section_type·metrics payload 저장 + must 필터 검색
 
 bge-m3 선택 이유:
 - 다국어 SOTA 임베딩 모델 (한국어 성능 우수, MIRACL 1위)
@@ -26,9 +27,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from typing import Any
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance, FieldCondition, Filter, MatchValue,
+    PointStruct, VectorParams,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,10 +97,15 @@ def _collection_name(doc_id: str) -> str:
     return f"doc_{h}"
 
 
-def index_chunks(chunks: list[str], doc_id: str) -> str:
+def index_chunks(chunks: list[dict], doc_id: str) -> str:
     """
-    청크 리스트를 bge-m3로 임베딩해 Qdrant에 저장.
+    청크 dict 리스트를 bge-m3로 임베딩해 Qdrant에 저장.
+    #75: text 외에 doc_year·section_type·metrics도 payload에 함께 저장.
     이미 동일 컬렉션이 존재하면 삭제 후 재생성 (문서 갱신 대응).
+
+    Args:
+        chunks: Chunk TypedDict 리스트 (text, doc_year, section_type, metrics 포함)
+        doc_id: 문서 식별자
 
     Returns:
         컬렉션 이름
@@ -114,20 +124,52 @@ def index_chunks(chunks: list[str], doc_id: str) -> str:
     )
     logger.info("컬렉션 생성: %s (%d청크)", col_name, len(chunks))
 
-    vectors = _embed_documents(chunks)
-    points  = [
-        PointStruct(id=i, vector=v, payload={"text": t})
-        for i, (t, v) in enumerate(zip(chunks, vectors))
-    ]
+    # 텍스트만 임베딩, 메타데이터는 payload에 별도 저장
+    texts   = [c["text"] if isinstance(c, dict) else c for c in chunks]
+    vectors = _embed_documents(texts)
+
+    points: list[PointStruct] = []
+    for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        if isinstance(chunk, dict):
+            payload: dict[str, Any] = {
+                "text":         chunk.get("text", ""),
+                "doc_year":     chunk.get("doc_year"),      # str | None
+                "section_type": chunk.get("section_type"),  # str | None
+                "metrics":      chunk.get("metrics", []),    # list[str]
+                "section":      chunk.get("section", ""),
+                "chunk_type":   chunk.get("chunk_type", "text"),
+            }
+        else:
+            # 하위 호환: 순수 문자열 청크 허용
+            payload = {"text": chunk}
+        points.append(PointStruct(id=i, vector=vec, payload=payload))
+
     client.upsert(collection_name=col_name, points=points)
-    logger.info("벡터 저장 완료: %s", col_name)
+    logger.info(
+        "벡터 저장 완료: %s (doc_year 있는 청크: %d개)",
+        col_name,
+        sum(1 for p in points if p.payload.get("doc_year")),
+    )
     return col_name
 
 
-def search_chunks(question: str, doc_id: str, top_k: int = 5) -> list[str]:
+def search_chunks(
+    question: str,
+    doc_id: str,
+    top_k: int = 5,
+    doc_year: str | None = None,
+    section_type: str | None = None,
+) -> list[str]:
     """
     Dense 검색: 질문 bge-m3 임베딩 → Qdrant cosine 유사도 검색.
-    쿼리에 'query:' prefix 적용 (bge 공식 권고).
+    #75: doc_year·section_type must 필터 지원.
+
+    Args:
+        question:     검색 질문
+        doc_id:       문서 식별자
+        top_k:        반환 청크 수
+        doc_year:     연도 필터 (예: "2023") — None이면 필터 미적용
+        section_type: 섹션 유형 필터 ("실적"|"리스크"|"전망") — None이면 미적용
 
     Returns:
         유사도 높은 청크 텍스트 리스트 (최대 top_k개)
@@ -141,12 +183,32 @@ def search_chunks(question: str, doc_id: str, top_k: int = 5) -> list[str]:
             logger.warning("컬렉션 없음 — dense 검색 스킵: %s", col_name)
             return []
 
+        # #75: must 조건 구성 — None인 필드는 조건에서 제외
+        must_conditions = []
+        if doc_year is not None:
+            must_conditions.append(
+                FieldCondition(key="doc_year", match=MatchValue(value=doc_year))
+            )
+        if section_type is not None:
+            must_conditions.append(
+                FieldCondition(key="section_type", match=MatchValue(value=section_type))
+            )
+
+        qdrant_filter = Filter(must=must_conditions) if must_conditions else None
+
+        if qdrant_filter:
+            logger.debug(
+                "Qdrant 필터 적용 — doc_year=%s, section_type=%s",
+                doc_year, section_type,
+            )
+
         q_vec   = _embed_query(question)
         results = client.query_points(
             collection_name=col_name,
             query=q_vec,
             limit=top_k,
             with_payload=True,
+            query_filter=qdrant_filter,
         ).points
         return [r.payload["text"] for r in results if r.payload]
     except Exception as e:
