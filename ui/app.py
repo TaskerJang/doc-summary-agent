@@ -143,10 +143,6 @@ async def _run_index(
     task3: cl.Task,
     task_list: cl.TaskList,
 ) -> str | None:
-    """
-    벡터 인덱싱을 실행하고 task3 상태를 업데이트한다.
-    #75: raw_chunks(str) 대신 chunks(dict) 전달 — 메타데이터 payload 저장 포함.
-    """
     try:
         from summarizer.embedder import index_chunks
         await asyncio.to_thread(index_chunks, chunks, doc_id)
@@ -207,14 +203,14 @@ async def on_settings_update(settings: dict) -> None:
     )
 
 
-# ── #69 Human Feedback 훅 ─────────────────────────────────────────────────────
+# ── #69 Human Feedback 훅 ───────────────────────────────────────────────────
 @cl.on_feedback
-async def on_feedback(feedback: cl.Feedback) -> None:
+async def on_feedback(feedback) -> None:
     """
     QA 답변 메시지의 thumbs up/down 피드백 수집.
 
-    data persistence(SQLite) 없이도 동작 — 로그로 수집 후
-    향후 DB 적재 또는 eval 파이프라인 연계 가능.
+    cl.Feedback 타입 힙트 제거 — Chainlit 2.10.x에서는 모듈 레벨에 노출되지 않음.
+    feedback 객체는 .value(1=👍/0=👎), .comment, .threadId 속성 보유.
 
     feedback.value:
         1  → 👍 (긍정)
@@ -222,16 +218,17 @@ async def on_feedback(feedback: cl.Feedback) -> None:
     feedback.comment:
         사용자가 입력한 텍스트 코멘트 (없으면 None)
     """
-    emoji   = "👍" if feedback.value == 1 else "👎"
-    comment = f" | 코멘트: {feedback.comment!r}" if feedback.comment else ""
+    emoji   = "👍" if getattr(feedback, "value", None) == 1 else "👎"
+    comment = f" | 코멘트: {feedback.comment!r}" if getattr(feedback, "comment", None) else ""
     doc_id  = cl.user_session.get("doc_id") or "unknown"
+    thread_id = getattr(feedback, "threadId", "unknown")
 
     logger.info(
         "[Feedback] %s value=%s doc_id=%s thread_id=%s%s",
         emoji,
-        feedback.value,
+        getattr(feedback, "value", "?"),
         doc_id,
-        feedback.threadId,
+        thread_id,
         comment,
     )
 
