@@ -99,8 +99,9 @@ def _strip_ocr_noise(text: str) -> str:
     return _OCR_NOISE_RE.sub("", text).strip()
 
 
-def _call_qa(user_prompt: str) -> str:
-    return _call_api(
+async def _call_qa(user_prompt: str) -> str:
+    """_call_api는 async def이므로 반드시 await 호출."""
+    return await _call_api(
         messages=[
             {"role": "system", "content": _QA_SYSTEM_PROMPT},
             {"role": "user",   "content": user_prompt},
@@ -273,7 +274,7 @@ def _make_sources(answer: str, relevant_sections: list) -> list[SourceItem]:
     return result
 
 
-def ask(
+async def ask(
     question: str,
     summary: SummaryResult,
     raw_chunks: list[str] | None = None,
@@ -281,8 +282,9 @@ def ask(
     doc_id: str | None = None,
 ) -> QAResult:
     """
-    Q&A 메인 함수.
+    Q&A 메인 함수 (async).
 
+    _call_api가 async def이므로 ask()도 async로 전환. (#68 AsyncOpenAI 이관 후속)
     검색 파이프라인: BM25 + Dense(Qdrant) → RRF → bge-reranker-v2-m3 → LLM
     doc_id 없으면 BM25 단독 (하위 호환).
     """
@@ -305,7 +307,7 @@ def ask(
         if relevant_sections or relevant_chunks:
             context     = _build_context(relevant_sections, relevant_chunks)
             user_prompt = template.format(question=question, context=context)
-            raw = _call_qa(user_prompt)
+            raw = await _call_qa(user_prompt)
 
             if not _is_unanswerable(raw):
                 sources = _make_sources(raw, relevant_sections)
@@ -321,7 +323,7 @@ def ask(
         logger.info("overall fallback 사용")
         context     = _build_context([], [], overall=summary.overall, force_overall=True)
         user_prompt = template.format(question=question, context=context)
-        raw = _call_qa(user_prompt)
+        raw = await _call_qa(user_prompt)
 
         if _is_unanswerable(raw):
             return QAResult(answer=raw, sources=[], is_answerable=False)
