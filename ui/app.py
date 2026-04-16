@@ -207,6 +207,35 @@ async def on_settings_update(settings: dict) -> None:
     )
 
 
+# ── #69 Human Feedback 훅 ─────────────────────────────────────────────────────
+@cl.on_feedback
+async def on_feedback(feedback: cl.Feedback) -> None:
+    """
+    QA 답변 메시지의 thumbs up/down 피드백 수집.
+
+    data persistence(SQLite) 없이도 동작 — 로그로 수집 후
+    향후 DB 적재 또는 eval 파이프라인 연계 가능.
+
+    feedback.value:
+        1  → 👍 (긍정)
+        0  → 👎 (부정)
+    feedback.comment:
+        사용자가 입력한 텍스트 코멘트 (없으면 None)
+    """
+    emoji   = "👍" if feedback.value == 1 else "👎"
+    comment = f" | 코멘트: {feedback.comment!r}" if feedback.comment else ""
+    doc_id  = cl.user_session.get("doc_id") or "unknown"
+
+    logger.info(
+        "[Feedback] %s value=%s doc_id=%s thread_id=%s%s",
+        emoji,
+        feedback.value,
+        doc_id,
+        feedback.threadId,
+        comment,
+    )
+
+
 @cl.on_message
 async def on_message(message: cl.Message):
 
@@ -267,7 +296,6 @@ async def on_message(message: cl.Message):
             await cl.Message(content=f"❌ 청킹 실패: {step2.get('chunk_error', '알 수 없는 오류')}").send()
             return
 
-        # #75: 메타데이터 포함된 dict 청크 전체를 인덱서에 전달
         chunks     = step2.get("chunks", [])
         raw_chunks = [c["text"] for c in chunks if isinstance(c, dict) and c.get("text")]
 
@@ -277,7 +305,6 @@ async def on_message(message: cl.Message):
         task4.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # Step 3: chunks(dict) 전달 → 메타데이터 payload 포함 인덱싱
         final_doc_id, step3 = await asyncio.gather(
             _run_index(chunks, doc_id, task3, task_list),
             run_step3(step2),
