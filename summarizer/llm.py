@@ -1,12 +1,12 @@
+import asyncio
 import json
 import logging
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI, RateLimitError, APITimeoutError, APIConnectionError
+from openai import AsyncOpenAI, RateLimitError, APITimeoutError, APIConnectionError
 from pydantic import BaseModel
 from tenacity import (
     retry,
@@ -18,17 +18,28 @@ from tenacity import (
 logger = logging.getLogger(__name__)
 
 # ── 상수 ──────────────────────────────────────────────────
-MODEL       = "gpt-5.2"
-TIMEOUT     = 30
-MAX_WORKERS = 5
+MODEL          = "gpt-5.2"
+TIMEOUT        = 30
+MAX_CONCURRENT = 8   # Semaphore 상한 (rate limit 대응)
 PROMPTS_DIR         = Path(__file__).parent / "prompts"
 SYSTEM_PROMPT_PATH  = PROMPTS_DIR / "system_v1.md"
 OCR_WARNING_PATH    = PROMPTS_DIR / "ocr_warning_v1.md"
 CHUNK_PROMPT_PATH   = PROMPTS_DIR / "chunk_summary_v1.md"
 OVERALL_PROMPT_PATH = PROMPTS_DIR / "overall_summary_v1.md"
 
-# ── OpenAI 클라이언트 ──────────────────────────────────────
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ── AsyncOpenAI 클라이언트 ─────────────────────────────────
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# ── Semaphore (모듈 레벨 — 이벤트 루프와 생명주기 공유) ────
+_sem: asyncio.Semaphore | None = None
+
+
+def _get_sem() -> asyncio.Semaphore:
+    """실행 중인 이벤트 루프에서 Semaphore를 지연 초기화한다."""
+    global _sem
+    if _sem is None:
+        _sem = asyncio.Semaphore(MAX_CONCURRENT)
+    return _sem
 
 
 # ── 출력 스키마 ────────────────────────────────────────────
@@ -71,8 +82,8 @@ def _load_system_prompt(is_image_based: bool) -> str:
     stop=stop_after_attempt(3),
     reraise=True,
 )
-def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
-    response = client.chat.completions.create(
+async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
+    response = await client.chat.completions.create(
         model=MODEL,
         messages=messages,
         temperature=0.3,
@@ -82,8 +93,8 @@ def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
     return response.choices[0].message.content or ""
 
 
-# ── Map 단계: 청크 → 섹션 요약 ────────────────────────────
-def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | None:
+# ── Map 단계: 청크 → 섹션 요약 (Semaphore 보호) ───────────
+async def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | None:
     section = chunk.get("section") or "(no section)"
     text    = chunk.get("text", "").strip()
 
@@ -93,54 +104,55 @@ def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | None:
     template    = CHUNK_PROMPT_PATH.read_text(encoding="utf-8")
     user_prompt = template.format(section=section, text=text)
 
-    try:
-        raw = _call_api(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            max_tokens=600,  # chart_spec 필드 추가로 500 → 600 상향
-        )
-
-        raw = raw.strip()
-        if not raw:
-            logger.warning("청크 요약 빈 응답 (section=%r)", section)
-            return None
-
-        # 마크다운 코드블록 제거
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        # JSON 파싱 — 실패 시 작은따옴표 이스케이프 후 재시도
+    async with _get_sem():  # 동시 호출 수 제한
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            raw_fixed = re.sub(
-                r"(?<=: \")([^\"]*)'([^\"]*?)(?=\")", r"\1\'\2", raw
+            raw = await _call_api(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                max_tokens=600,  # chart_spec 필드 추가로 500 → 600 상향
             )
-            data = json.loads(raw_fixed)
 
-        # chart_spec이 없거나 chart_type=none이면 None으로 정규화
-        chart_spec = data.get("chart_spec")
-        if isinstance(chart_spec, dict):
-            if str(chart_spec.get("chart_type", "none")).lower() == "none":
+            raw = raw.strip()
+            if not raw:
+                logger.warning("청크 요약 빈 응답 (section=%r)", section)
+                return None
+
+            # 마크다운 코드블록 제거
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+
+            # JSON 파싱 — 실패 시 작은따옴표 이스케이프 후 재시도
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                raw_fixed = re.sub(
+                    r"(?<=: \")([^\"]*)'([^\"]*?)(?=\")", r"\1\'\2", raw
+                )
+                data = json.loads(raw_fixed)
+
+            # chart_spec이 없거나 chart_type=none이면 None으로 정규화
+            chart_spec = data.get("chart_spec")
+            if isinstance(chart_spec, dict):
+                if str(chart_spec.get("chart_type", "none")).lower() == "none":
+                    chart_spec = None
+            else:
                 chart_spec = None
-        else:
-            chart_spec = None
 
-        data["chart_spec"] = chart_spec
-        return SectionSummary(**data)
+            data["chart_spec"] = chart_spec
+            return SectionSummary(**data)
 
-    except Exception as e:
-        logger.warning("청크 요약 실패 (section=%r): %s", section, e)
-        return None
+        except Exception as e:
+            logger.warning("청크 요약 실패 (section=%r): %s", section, e)
+            return None  # graceful fallback — 전체 중단 없음
 
 
 # ── Reduce 단계: 섹션 요약 → 전체 요약 ────────────────────
-def _summarize_overall(
+async def _summarize_overall(
     sections: list[SectionSummary],
     system_prompt: str,
     chunk_count: int,
@@ -159,7 +171,7 @@ def _summarize_overall(
     )
 
     try:
-        result = _call_api(
+        result = await _call_api(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
@@ -181,10 +193,14 @@ def _summarize_overall(
 
 
 # ── 공개 인터페이스 ────────────────────────────────────────
-def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult:
+async def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult:
     """
     청크 배열을 받아 전체 요약 및 섹션별 요약을 반환한다.
-    청크 요약은 ThreadPoolExecutor로 병렬 처리한다.
+
+    청크 요약은 asyncio.gather() + Semaphore로 병렬 처리한다. (이슈 #68)
+    - 순서 보장: gather()는 입력 순서대로 결과를 반환한다.
+    - Rate limit 대응: Semaphore(MAX_CONCURRENT)로 동시 호출 수를 제한한다.
+    - Graceful fallback: 개별 청크 실패 시 None 반환, 전체 중단 없음.
     각 SectionSummary에는 chart_spec이 포함될 수 있다 (이슈 #60).
     """
     chunk_count = len(chunks)
@@ -192,15 +208,11 @@ def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult
 
     system_prompt = _load_system_prompt(is_image_based)
 
-    # Map: 병렬 청크 요약
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [
-            executor.submit(_summarize_chunk, c, system_prompt)
-            for c in chunks
-        ]
-        sections: list[SectionSummary] = [
-            f.result() for f in futures if f.result() is not None
-        ]
+    # Map: asyncio.gather로 청크 요약 병렬 실행 (순서 보장)
+    raw_results: list[SectionSummary | None] = await asyncio.gather(
+        *[_summarize_chunk(c, system_prompt) for c in chunks]
+    )
+    sections: list[SectionSummary] = [r for r in raw_results if r is not None]
 
     if not sections:
         logger.warning("섹션 요약 결과 없음 — 유효한 청크 없음")
@@ -211,7 +223,7 @@ def summarize(chunks: list[dict], is_image_based: bool = False) -> SummaryResult
         )
 
     # Reduce: 전체 핵심 요약 (청크 수 기반 불릿 수 동적 결정)
-    overall = _summarize_overall(sections, system_prompt, chunk_count)
+    overall = await _summarize_overall(sections, system_prompt, chunk_count)
 
     chart_count = sum(1 for s in sections if s.chart_spec is not None)
     logger.info(
