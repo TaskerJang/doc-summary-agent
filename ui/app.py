@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 import chainlit as cl
+from chainlit.input_widget import Slider, Switch
 
 from main import run_step1, run_step2, run_step3
 from summarizer.llm import SummaryResult, SectionSummary
@@ -17,7 +18,7 @@ from summarizer.chart_router import route as chart_route
 
 logger = logging.getLogger(__name__)
 
-# ── 차트 상한선 (MIT Sloan 금융 시각화 best practice 기준) ─
+# ── 차트 상한선 기본값 (사용자가 ChatSettings로 덮어쓸 수 있음) ─
 MAX_CHARTS_PER_DOC = 5
 
 # ── 차트 크기 (Chainlit 공식 문서 기준) ───────────────────
@@ -116,12 +117,20 @@ async def _send_qa_answer(qa_result) -> None:
 
 # ── 섹션별 차트 렌더링 ─────────────────────────────────────
 async def _render_charts(summary: SummaryResult) -> None:
+    # ChatSettings에서 사용자가 설정한 값 우선, 없으면 상수 기본값 사용
+    chart_enabled: bool = cl.user_session.get("chart_enabled", True)
+    max_charts: int     = int(cl.user_session.get("max_charts", MAX_CHARTS_PER_DOC))
+
+    if not chart_enabled:
+        logger.info("차트 자동 생성 비활성화 (ChatSettings) — 건너뜀")
+        return
+
     rendered = 0
 
     for sec in summary.sections:
-        if rendered >= MAX_CHARTS_PER_DOC:
+        if rendered >= max_charts:
             logger.info(
-                "차트 상한선 도달 (%d개) — 이후 섹션 차트 생략", MAX_CHARTS_PER_DOC
+                "차트 상한선 도달 (%d개) — 이후 섹션 차트 생략", max_charts
             )
             break
 
@@ -181,9 +190,46 @@ async def on_chat_start():
     cl.user_session.set("result",     None)
     cl.user_session.set("raw_chunks", [])
     cl.user_session.set("doc_id",     None)
+
+    # ── ChatSettings 위젯 등록 및 초기값 세션 저장 (이슈 #67) ─
+    settings = await cl.ChatSettings(
+        [
+            Switch(
+                id="chart_enabled",
+                label="차트 자동 생성",
+                description="문서 분석 후 수치 데이터를 Plotly 차트로 자동 렌더링합니다.",
+                initial=True,
+            ),
+            Slider(
+                id="max_charts",
+                label="최대 차트 수",
+                description="한 문서당 렌더링할 차트의 최대 개수입니다.",
+                initial=MAX_CHARTS_PER_DOC,
+                min=1,
+                max=10,
+                step=1,
+            ),
+        ]
+    ).send()
+
+    cl.user_session.set("chart_enabled", settings["chart_enabled"])
+    cl.user_session.set("max_charts",    int(settings["max_charts"]))
+
     await cl.Message(
         content="안녕하세요! 📄 아래 **파일 업로드 버튼**으로 문서를 업로드해 주세요.\n\nPDF · DOCX · HWP · DOC 형식을 지원합니다."
     ).send()
+
+
+# ── ChatSettings 변경 훅 (이슈 #67) ───────────────────────
+@cl.on_settings_update
+async def on_settings_update(settings: dict) -> None:
+    cl.user_session.set("chart_enabled", settings["chart_enabled"])
+    cl.user_session.set("max_charts",    int(settings["max_charts"]))
+    logger.info(
+        "ChatSettings 업데이트 — chart_enabled=%s, max_charts=%d",
+        settings["chart_enabled"],
+        int(settings["max_charts"]),
+    )
 
 
 # ── 파일 업로드 + Q&A 처리 ─────────────────────────────────
