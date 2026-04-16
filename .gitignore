@@ -25,3 +25,6 @@ pipeline.log
 
 # SQLite data layer (#69 Human Feedback / #70 Chat History)
 chainlit.db
+
+# Human Feedback 로그 (#69)
+feedback_log.jsonl
