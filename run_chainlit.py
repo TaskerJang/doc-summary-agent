@@ -3,13 +3,14 @@ import sys
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import chainlit.data as cl_data
 from chainlit.data import BaseDataLayer
 from chainlit.types import Feedback
+from chainlit.user import PersistedUser
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,21 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
     upsert_feedback()만 구현, 나머지는 no-op.
     피드백은 feedback_log.jsonl로 저장.
     """
+
+    async def get_user(self, identifier: str):
+        # 인증 통과를 위해 항상 유효한 PersistedUser 반환
+        return PersistedUser(
+            id=identifier,
+            identifier=identifier,
+            createdAt=datetime.now(timezone.utc).isoformat(),
+        )
+
+    async def create_user(self, user):
+        return PersistedUser(
+            id=user.identifier,
+            identifier=user.identifier,
+            createdAt=datetime.now(timezone.utc).isoformat(),
+        )
 
     async def upsert_feedback(self, feedback: Feedback) -> str:
         entry = {
@@ -44,9 +60,6 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
             logger.warning("[Feedback] 파일 저장 실패: %s", e)
         return feedback.id or ""
 
-    # 필수 추상 메서드 스튱 (no-op)
-    async def get_user(self, identifier: str): return None
-    async def create_user(self, user): return None
     async def update_thread(self, thread_id, name=None, user_id=None,
                             metadata=None, tags=None): pass
     async def get_thread(self, thread_id): return None
@@ -61,7 +74,6 @@ class FeedbackOnlyDataLayer(BaseDataLayer):
     async def delete_step(self, step_id): pass
     async def get_all_user_threads(self, user_id=None, thread_id=None): return None
     async def delete_feedback(self, feedback_id): return True
-    # Chainlit 2.11 추가 추상 메서드
     async def build_debug_url(self) -> str: return ""
     async def close(self): pass
     async def get_favorite_steps(self): return []
