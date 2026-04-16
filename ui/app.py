@@ -34,7 +34,9 @@ def auth_callback(username: str, password: str):
     return None
 
 
-def _to_summary_result(result: dict) -> SummaryResult | None:
+def _to_summary_result(result) -> SummaryResult | None:
+    if not result:
+        return None
     summary_dict = result.get("summary")
     if not summary_dict:
         return None
@@ -152,8 +154,22 @@ def _index_in_background(chunks: list[dict], doc_id: str) -> None:
         except Exception as e:
             logger.warning("백그라운드 인덱싱 실패: %s", e)
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
+    threading.Thread(target=_run, daemon=True).start()
+
+
+async def _run_qa(question: str) -> None:
+    """Q&A 공통 실행 — on_message / on_followup 양쪽에서 사용."""
+    result     = cl.user_session.get("result")
+    summary    = _to_summary_result(result)
+    raw_chunks = cl.user_session.get("raw_chunks") or []
+    doc_id     = cl.user_session.get("doc_id")
+
+    if not summary:
+        await cl.Message(content="먼저 문서를 업로드해 주세요.").send()
+        return
+
+    qa_result = await ask(question, summary, raw_chunks, None, doc_id)
+    await _send_qa_answer(qa_result)
 
 
 @cl.on_chat_start
@@ -226,12 +242,12 @@ async def on_message(message: cl.Message):
 
         await cl.Message(content=f"⏳ **Step 3** · 요약 생성 중... ({chunk_count}개 청크)").send()
 
-        # Step 3: 요약 (LLM — asyncio 기반이므로 이벤트 루프 친화적)
+        # Step 3: 요약
         logger.info("요약 시작")
         step3 = await run_step3(step2)
         logger.info("요약 완료")
 
-        # 인덱싱: threading.Thread로 완전히 분리 (bge-m3 GIL 블로킹 방지)
+        # 인덱싱: 백그라운드 스레드 (bge-m3 GIL 블로킹 방지)
         _index_in_background(chunks, filename)
 
         summary_dict  = step3.get("summary", {})
@@ -272,37 +288,10 @@ async def on_message(message: cl.Message):
         return
 
     # Q&A
-    result = cl.user_session.get("result")
-    if not result:
-        await cl.Message(content="먼저 문서를 업로드해 주세요.").send()
-        return
-    summary = _to_summary_result(result)
-    if not summary:
-        await cl.Message(content="요약 결과가 없어 Q&A를 실행할 수 없습니다.").send()
-        return
-    qa_result = await ask(
-        message.content,
-        summary,
-        cl.user_session.get("raw_chunks") or [],
-        None,
-        cl.user_session.get("doc_id"),
-    )
-    await _send_qa_answer(qa_result)
+    await _run_qa(message.content)
 
 
 @cl.action_callback("followup")
 async def on_followup(action: cl.Action):
-    result  = cl.user_session.get("result")
-    summary = _to_summary_result(result)
-    if not summary:
-        await cl.Message(content="요약 결과가 없어 Q&A를 실행할 수 없습니다.").send()
-        return
     await cl.Message(content=action.payload["value"], author="user").send()
-    qa_result = await ask(
-        action.payload["value"],
-        summary,
-        cl.user_session.get("raw_chunks") or [],
-        None,
-        cl.user_session.get("doc_id"),
-    )
-    await _send_qa_answer(qa_result)
+    await _run_qa(action.payload["value"])
