@@ -1,7 +1,7 @@
 """
 ui/app.py
 Chainlit UI 진입점 — ChatGPT 스타일
-파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → 추천 질문 → Q&A
+파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → 추천 질문 버튼 → Q&A
 """
 import asyncio
 import logging
@@ -80,24 +80,20 @@ async def _stream_by_lines(msg: cl.Message, text: str) -> None:
             await msg.stream_token(line)
 
 
-def _build_follow_up_text(summary: SummaryResult | None) -> str:
-    """추천 질문을 클릭 가능한 텍스트 버튼으로 구성.
+def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
+    """추천 질문을 cl.Action 버튼 리스트로 구성.
 
-    cl.Action은 HybridDataLayer 환경에서 on_chat_start를 재트리거하는
-    버그가 있어 일반 텍스트 메시지로 대체한다.
-    사용자가 버튼 텍스트를 복사해서 입력하거나, 텍스트 자체를 클릭하면
-    on_message로 처리된다.
+    #70에서 SQLAlchemyDataLayer로 전환되면서 HybridDataLayer 시절의
+    action_callback → on_chat_start 재트리거 버그가 재현되지 않는지 재검증 중.
     """
     if not summary:
-        questions = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
-    else:
-        follow_ups = generate_follow_ups(summary)
-        questions = [fu.question for fu in follow_ups]
-
-    lines = ["💬 **이런 것도 물어보세요**\n"]
-    for q in questions:
-        lines.append(f"- {q}")
-    return "\n".join(lines)
+        defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
+        return [cl.Action(name="followup", payload={"value": q}, label=q) for q in defaults]
+    follow_ups = generate_follow_ups(summary)
+    return [
+        cl.Action(name="followup", payload={"value": fu.question}, label=fu.question)
+        for fu in follow_ups
+    ]
 
 
 async def _send_qa_answer(qa_result) -> None:
@@ -180,7 +176,7 @@ def _index_in_background(chunks: list[dict], doc_id: str) -> None:
 
 
 async def _run_qa(question: str) -> None:
-    """Q&A 공통 실행 — on_message에서 사용."""
+    """Q&A 공통 실행 — on_message / on_followup 양쪽에서 사용."""
     result     = cl.user_session.get("result")
     summary    = _to_summary_result(result)
     raw_chunks = cl.user_session.get("raw_chunks") or []
@@ -334,12 +330,24 @@ async def on_message(message: cl.Message):
         # ── #70: cl.Pdf(display="side") 제거 ──
         # SQLAlchemyDataLayer + blob_storage 미설정 환경에서 create_element가
         # 무한 블로킹되는 문제가 확인됨. 향후 blob_storage(S3/GCS 등) 연결 시 복원.
-        # 현재는 업로드된 원본 파일 참조만으로 대응.
 
-        # 추천 질문 — cl.Action 대신 텍스트로 표시 (HybridDataLayer 환경에서 action_callback이 on_chat_start를 재트리거하는 버그 회피)
-        follow_up_text = _build_follow_up_text(summary)
-        await cl.Message(content=follow_up_text).send()
+        # 추천 질문 버튼 (cl.Action) — SQLAlchemy 환경에서 재시도
+        actions = _build_follow_ups(summary)
+        await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
         return
 
-    # Q&A — 추천 질문 텍스트 포함 모든 일반 메시지 처리
+    # Q&A
     await _run_qa(message.content)
+
+
+@cl.action_callback("followup")
+async def on_followup(action: cl.Action):
+    """추천 질문 버튼 클릭 시 호출.
+
+    user 메시지로 질문 텍스트를 띄우고 그대로 _run_qa에 넘김.
+    과거 HybridDataLayer 환경에서는 이 콜백이 on_chat_start를 재트리거하여
+    세션이 리셋되는 버그가 있었음. SQLAlchemy 환경에서 재현 여부 확인 필요.
+    """
+    question = action.payload["value"]
+    await cl.Message(content=question, author="user").send()
+    await _run_qa(question)
