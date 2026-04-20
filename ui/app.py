@@ -1,7 +1,7 @@
 """
 ui/app.py
 Chainlit UI 진입점 — ChatGPT 스타일
-파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → 추천 질문 버튼 → Q&A
+파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → PDF 원문 → 추천 질문 버튼 → Q&A
 """
 import asyncio
 import logging
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 MAX_CHARTS_PER_DOC = 5
 CHART_SIZE = "small"
 CHART_SEND_TIMEOUT = 5
+PDF_SEND_TIMEOUT = 5
 
 _APP_USERNAME = os.getenv("APP_USERNAME", "admin")
 _APP_PASSWORD = os.getenv("APP_PASSWORD", "1234!")
@@ -153,6 +154,28 @@ async def _render_charts(summary: SummaryResult) -> None:
             logger.warning("차트 렌더링 실패 (section=%r): %s", sec.section, e)
     if rendered > 0:
         logger.info("차트 렌더링 완료 — %d개 출력 (size=%s)", rendered, CHART_SIZE)
+
+
+async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
+    """PDF 원문을 사이드 패널로 전송.
+
+    blob_storage 미설정 환경에서 create_element가 경고만 뿌리고 지나가므로
+    시도해볼 가치가 있음. 만약 실제로 블로킹되면 PDF_SEND_TIMEOUT에서 끊긴다.
+    resume 시 복원은 blob_storage 연결(#101) 후에만 가능.
+    """
+    try:
+        await asyncio.wait_for(
+            cl.Message(
+                content=f"📂 원문 보기 — {filename}",
+                elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)],
+            ).send(),
+            timeout=PDF_SEND_TIMEOUT,
+        )
+        logger.info("PDF 사이드 패널 전송 완료: %s", filename)
+    except asyncio.TimeoutError:
+        logger.warning("PDF 사이드 패널 전송 타임아웃 (%ds 초과): %s", PDF_SEND_TIMEOUT, filename)
+    except Exception as e:
+        logger.warning("PDF 사이드 패널 전송 실패: %s — %s", filename, e)
 
 
 def _index_in_background(chunks: list[dict], doc_id: str) -> None:
@@ -327,9 +350,11 @@ async def on_message(message: cl.Message):
         if summary:
             await _render_charts(summary)
 
-        # ── #70: cl.Pdf(display="side") 제거 ──
-        # SQLAlchemyDataLayer + blob_storage 미설정 환경에서 create_element가
-        # 무한 블로킹되는 문제가 확인됨. 향후 blob_storage(S3/GCS 등) 연결 시 복원.
+        # PDF 원문 사이드 패널 — SQLAlchemy + blob_storage 미설정 환경에서도 시도
+        # 실패/타임아웃 시 graceful skip (PDF_SEND_TIMEOUT=5s)
+        # resume 시 복원은 blob_storage 연결(#101) 후에만 가능
+        if tmp_path.suffix.lower() == ".pdf":
+            await _send_pdf_side_panel(filename, tmp_path)
 
         # 추천 질문 버튼 (cl.Action) — SQLAlchemy 환경에서 재시도
         actions = _build_follow_ups(summary)
