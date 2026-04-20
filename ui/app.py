@@ -67,6 +67,19 @@ def _fmt(value, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
+async def _stream_by_lines(msg: cl.Message, text: str) -> None:
+    """줄 단위로 stream_token 호출.
+
+    SQLAlchemyDataLayer 환경에서 stream_token은 매 호출마다 update_step DB write를
+    유발하여 한 글자씩 스트리밍하면 수백~수천회의 DB I/O가 발생, 오히려 병목이 되어
+    스트리밍 효과가 사라진다. 줄 단위로 보내면 DB write 수가 수십 회로 줄어들어
+    실제 스트리밍 UX가 유지된다.
+    """
+    for line in text.splitlines(keepends=True):
+        if line:
+            await msg.stream_token(line)
+
+
 def _build_follow_up_text(summary: SummaryResult | None) -> str:
     """추천 질문을 클릭 가능한 텍스트 버튼으로 구성.
 
@@ -92,14 +105,12 @@ async def _send_qa_answer(qa_result) -> None:
     await msg.send()
 
     if not qa_result.is_answerable:
-        for ch in f"⚠️ {qa_result.answer}":
-            await msg.stream_token(ch)
+        await _stream_by_lines(msg, f"⚠️ {qa_result.answer}")
         await msg.update()
         return
 
     answer = _fix_tilde(qa_result.answer)
-    for ch in answer:
-        await msg.stream_token(ch)
+    await _stream_by_lines(msg, answer)
 
     if qa_result.sources:
         lines = []
@@ -311,8 +322,7 @@ async def on_message(message: cl.Message):
             msg = cl.Message(content="")
             await msg.send()
             await msg.stream_token("📄 **전체 요약**\n\n")
-            for ch in overall:
-                await msg.stream_token(ch)
+            await _stream_by_lines(msg, overall)
             await msg.update()
         else:
             await cl.Message(content="⚠️ 전체 요약을 생성하지 못했습니다.").send()
