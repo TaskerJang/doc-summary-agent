@@ -7,6 +7,7 @@ __pycache__/
 tests/step1_parser/sample_docs/*
 !tests/step1_parser/sample_docs/.gitkeep
 tests/step1_parser/output/
+tests/step1_parser/run_pipeline.py
 
 # Step1 파서 테스트 — hwp5html 임시 출력 찌꺼기
 tests/step1_parser/-/
@@ -17,6 +18,10 @@ tests/step1_parser/picture/
 # Chainlit 업로드 임시 파일
 .files/
 
+# Chainlit 런타임 자동 생성 파일
+.chainlit/translations/
+chainlit.md
+
 # 로그
 pipeline.log
 
@@ -25,6 +30,10 @@ pipeline.log
 
 # SQLite data layer (#69 Human Feedback / #70 Chat History)
 chainlit.db
+*.db.bak
 
 # Human Feedback 로그 (#69)
 feedback_log.jsonl
+
+# 평가 실행 결과 (로컬 실험용)
+eval/results/
