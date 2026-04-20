@@ -1,7 +1,7 @@
 """
 ui/app.py
 Chainlit UI 진입점 — ChatGPT 스타일
-파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → PDF 원문 → 추천 질문 → Q&A
+파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → 추천 질문 → Q&A
 """
 import asyncio
 import logging
@@ -321,12 +321,10 @@ async def on_message(message: cl.Message):
         if summary:
             await _render_charts(summary)
 
-        # PDF 원문
-        if tmp_path.suffix.lower() == ".pdf":
-            await cl.Message(
-                content=f"📂 원문 보기 — {filename}",
-                elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)],
-            ).send()
+        # ── #70: cl.Pdf(display="side") 제거 ──
+        # SQLAlchemyDataLayer + blob_storage 미설정 환경에서 create_element가
+        # 무한 블로킹되는 문제가 확인됨. 향후 blob_storage(S3/GCS 등) 연결 시 복원.
+        # 현재는 업로드된 원본 파일 참조만으로 대응.
 
         # 추천 질문 — cl.Action 대신 텍스트로 표시 (HybridDataLayer 환경에서 action_callback이 on_chat_start를 재트리거하는 버그 회피)
         follow_up_text = _build_follow_up_text(summary)
