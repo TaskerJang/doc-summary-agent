@@ -2,6 +2,17 @@
 
 기업공시, 사업보고서, 산업분석 리포트 등 복잡한 구조의 문서를 파싱·요약하고 질의응답하는 AI 에이전트
 
+## 스크린샷
+
+### 1. 로그인
+![로그인 화면](docs/images/01-login.jpeg)
+
+### 2. 문서 업로드 후 전체 요약
+![문서 업로드 후 전체 요약 결과](docs/images/02-summary.jpeg)
+
+### 3. 섹션별 자동 차트 렌더링
+![Plotly 자동 차트 렌더링](docs/images/03-charts.jpeg)
+
 ## 주요 기능
 
 - **다중 포맷 파싱** — PDF / DOCX / DOC / HWP 지원
@@ -68,6 +79,7 @@ doc-summary-agent/
 │   ├── run_eval.py     # 평가 실행 진입점
 │   └── generate_leaderboard.py
 ├── tests/              # 테스트
+├── docs/images/        # README 스크린샷
 ├── main.py             # CLI 파이프라인 진입점
 └── run_chainlit.py     # UI 실행 진입점 (SQLAlchemyDataLayer 주입 + DB 스키마 초기화)
 
