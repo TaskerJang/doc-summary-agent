@@ -11,6 +11,7 @@ eval/run_eval.py
     uv run python eval/run_eval.py --doc 한화투자증권_두산밥캣_기업분석_리포트.pdf
 """
 import argparse
+import asyncio
 import json
 import logging
 import sys
@@ -85,8 +86,12 @@ def run_pipeline(
     return step3
 
 
-def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: bool = True) -> dict:
+async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: bool = True) -> dict:
     """단일 QA 쌍에 대해 모든 지표를 계산한다.
+
+    ask()는 async def이므로 await 필요. (#68 AsyncOpenAI 이관 이후
+    run_eval.py 쪽이 갱신되지 않아 coroutine을 그대로 반환받던 버그를
+    #107 작업과 함께 수정.)
 
     Args:
         use_bm25: False면 raw_chunks=[] 전달 + pinned_section_indices=[] 로
@@ -105,8 +110,8 @@ def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: bool = 
         raw_chunks          = []
         pinned_indices      = []   # 빈 리스트 → relevant_sections = []
 
-    qa_result  = ask(question, summary, raw_chunks=raw_chunks,
-                     pinned_section_indices=pinned_indices)
+    qa_result  = await ask(question, summary, raw_chunks=raw_chunks,
+                           pinned_section_indices=pinned_indices)
     prediction = qa_result.answer if qa_result.is_answerable else "[답변 불가]"
 
     rouge   = compute_rouge(prediction, reference)
@@ -145,7 +150,7 @@ def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: bool = 
     return result
 
 
-def run_eval(
+async def run_eval(
     qa_pairs: list[dict],
     docs_dir: Path,
     chunk_sizes: list[int] | None = None,
@@ -189,7 +194,7 @@ def run_eval(
                     continue
 
                 for qa in qas:
-                    result = evaluate_qa(qa, summary, step3, use_bm25=use_bm25)
+                    result = await evaluate_qa(qa, summary, step3, use_bm25=use_bm25)
                     result["chunk_size"]    = chunk_size
                     result["chunk_overlap"] = chunk_overlap
                     all_results.append(result)
@@ -268,14 +273,14 @@ def main():
     qa_pairs = json.loads(QA_PATH.read_text(encoding="utf-8"))
     logger.info("QA 쌍 로드: %d개", len(qa_pairs))
 
-    results = run_eval(
+    results = asyncio.run(run_eval(
         qa_pairs=qa_pairs,
         docs_dir=DOCS_DIR,
         chunk_sizes=args.chunk_size,
         chunk_overlaps=args.chunk_overlap,
         filter_doc=args.doc or None,
         use_bm25=not args.no_bm25,
-    )
+    ))
 
     save_results(results, tag=args.tag)
     print_summary(results)
