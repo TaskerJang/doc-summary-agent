@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -50,18 +51,24 @@ _QA_SYSTEM_PROMPT = (
 # ── reranker 싱글턴 ─────────────────────────────────────────────────────────
 _reranker = None
 
-def _get_reranker():
+async def _aget_reranker():
     """
-    bge-reranker-v2-m3 싱글턴.
+    bge-reranker-v2-m3 싱글턴 (async).
     cross-encoder 방식으로 (질문, 청크) 쌍의 관련도를 0~1 스코어로 반환.
     미설치 또는 로드 실패 시 None 반환 → reranking 스킵.
+
+    첫 호출 시 CrossEncoder 초기화가 모델 파일 로드(디스크 I/O + CPU)로
+    수 초~수십 초 블로킹되므로 asyncio.to_thread로 감싸 이벤트 루프를
+    살려둔다. (#107)
     """
     global _reranker
     if _reranker is None:
         try:
             from sentence_transformers import CrossEncoder
             logger.info("bge-reranker-v2-m3 로딩 중...")
-            _reranker = CrossEncoder("BAAI/bge-reranker-v2-m3", max_length=512)
+            _reranker = await asyncio.to_thread(
+                CrossEncoder, "BAAI/bge-reranker-v2-m3", max_length=512
+            )
             logger.info("bge-reranker-v2-m3 로딩 완료")
         except Exception as e:
             logger.warning("reranker 로드 실패 — reranking 스킵: %s", e)
@@ -69,19 +76,23 @@ def _get_reranker():
     return _reranker if _reranker else None
 
 
-def _rerank(question: str, chunks: list[str], top_n: int = RERANK_TOP_N) -> list[str]:
+async def _rerank(question: str, chunks: list[str], top_n: int = RERANK_TOP_N) -> list[str]:
     """
     bge-reranker-v2-m3로 (질문, 청크) 쌍 관련도 스코어링 후 top_n 반환.
     reranker 없거나 청크 수가 top_n 이하면 그대로 반환.
+
+    reranker.predict는 CPU에서 cross-encoder 추론으로 첫 호출 ~1분 걸리므로
+    asyncio.to_thread로 분리. 이벤트 루프가 살아있어야 Chainlit websocket
+    ping/pong이 유지되어 세션이 끊기지 않는다. (#107)
     """
     if len(chunks) <= top_n:
         return chunks
-    reranker = _get_reranker()
+    reranker = await _aget_reranker()
     if reranker is None:
         return chunks[:top_n]
     try:
         pairs  = [(question, c) for c in chunks]
-        scores = reranker.predict(pairs)
+        scores = await asyncio.to_thread(reranker.predict, pairs)
         ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
         result = [c for _, c in ranked[:top_n]]
         logger.info("Reranking 완료 — %d → %d청크", len(chunks), len(result))
@@ -172,7 +183,7 @@ def _rrf_fusion(
     return ranked[:top_n]
 
 
-def _find_relevant_chunks_hybrid(
+async def _find_relevant_chunks_hybrid(
     question: str,
     raw_chunks: list[str],
     doc_id: str | None = None,
@@ -205,7 +216,7 @@ def _find_relevant_chunks_hybrid(
         fused = bm25_chunks
 
     # reranker로 최종 정밀도 향상
-    return _rerank(question, fused, top_n=RERANK_TOP_N)
+    return await _rerank(question, fused, top_n=RERANK_TOP_N)
 
 
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
@@ -299,7 +310,7 @@ async def ask(
     else:
         relevant_sections = _find_relevant_sections_bm25(question, summary)
 
-    relevant_chunks = _find_relevant_chunks_hybrid(question, raw_chunks or [], doc_id=doc_id)
+    relevant_chunks = await _find_relevant_chunks_hybrid(question, raw_chunks or [], doc_id=doc_id)
 
     template = QA_PROMPT_PATH.read_text(encoding="utf-8")
 
