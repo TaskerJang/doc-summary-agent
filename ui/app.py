@@ -110,6 +110,7 @@ async def _send_qa_answer(qa_result) -> None:
     await _stream_by_lines(msg, answer)
 
     if qa_result.sources:
+        # ── 출처 (섹션명 + snippet) — 기존 동작 유지 ────────────────────
         lines = []
         for i, s in enumerate(qa_result.sources):
             section = _clean(s.section)
@@ -118,7 +119,39 @@ async def _send_qa_answer(qa_result) -> None:
                 lines.append(f"`{i+1}` **{section}** — {snippet}")
             else:
                 lines.append(f"`{i+1}` **{section}**")
-        await msg.stream_token(f"\n\n---\n📌 **출처**\n" + "\n".join(lines))
+
+        # ── 원문 근거 (reranker top-3 청크 본문) — display="page" 오버레이 ──
+        # Chainlit 명세(chainlit/chainlit#1827): element의 name이 메시지 content에
+        # 문자열로 그대로 등장해야 그 부분이 클릭 가능한 링크로 변환된다. 즉
+        # cl.Text(name=ref_name, ...)의 ref_name이 content의 "🔍 ref_name" 안에
+        # 정확히 일치해야 한다. _send_pdf_side_panel의 filename 패턴과 동일. (#111)
+        #
+        # full_chunk가 비어있으면(예: relevant_chunks보다 relevant_sections가 긴
+        # 경우, 혹은 이론적으로 overall fallback에서 sources가 채워지는 엣지케이스)
+        # 해당 링크만 생략한다. overall fallback 주 경로는 sources=[]라서 이
+        # 블록 전체가 렌더되지 않는다.
+        reference_lines    = []
+        reference_elements = []
+        for i, s in enumerate(qa_result.sources):
+            if not s.full_chunk:
+                continue
+            ref_name = f"근거{i+1}_전체"
+            reference_elements.append(
+                cl.Text(
+                    name=ref_name,
+                    content=f"📍 **근거 {i+1} · {_clean(s.section)}**\n\n{s.full_chunk}",
+                    display="page",
+                )
+            )
+            reference_lines.append(f"🔍 {ref_name}")
+
+        footer = "\n\n---\n📌 **출처**\n" + "\n".join(lines)
+        if reference_lines:
+            footer += "\n\n**원문 근거**\n" + "\n".join(reference_lines)
+        await msg.stream_token(footer)
+
+        if reference_elements:
+            msg.elements = reference_elements
 
     await msg.update()
 
