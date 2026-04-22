@@ -109,74 +109,93 @@ function SourceItem({ item }) {
   );
 
   // full_chunk 없으면 호버/클릭 인터랙션 없이 정보만 표시 (엣지케이스 방어).
-  // 이 경로는 현재 로직상 도달 어려움 — _make_sources가 relevant_chunks를
-  // 인덱스 매칭으로 채우고, overall fallback 주 경로는 sources=[]라 이
-  // 엘리먼트 자체가 렌더되지 않음. 장래 변경 대비 방어 코드.
   if (!hasFullChunk) {
     return <li className="list-none">{triggerContent}</li>;
   }
 
+  // Dialog와 HoverCard의 asChild 중첩 문제 회피:
+  // 이전엔 <HoverCardTrigger asChild><Dialog>...</Dialog></HoverCardTrigger>
+  // 구조였는데, Radix의 asChild가 ref/이벤트를 자식 하나에 병합하려고 하다가
+  // 중첩 시 내부 DialogTrigger의 ref forwarding과 꼬여 HoverCard가 아예
+  // 작동하지 않았다. 공식 shadcn 패턴대로 Dialog는 최상위에 두고
+  // DialogTrigger + HoverCardTrigger를 같은 버튼 하나에 겹쳐 바인딩한다.
+  //
+  // 구조:
+  //   <Dialog>
+  //     <HoverCard>
+  //       <HoverCardTrigger asChild>
+  //         <DialogTrigger asChild>
+  //           <button>...</button>  ← 두 Trigger가 이 버튼 하나에 병합
+  //         </DialogTrigger>
+  //       </HoverCardTrigger>
+  //       <HoverCardContent>...</HoverCardContent>
+  //     </HoverCard>
+  //     <DialogContent>...</DialogContent>
+  //   </Dialog>
+  //
+  // 이러면 버튼 하나가 hover와 click 이벤트를 모두 받고, Radix가 내부적으로
+  // Slot 패턴으로 두 Trigger를 병합한다.
   return (
     <li className="list-none">
-      <HoverCard openDelay={250} closeDelay={150}>
-        <HoverCardTrigger asChild>
-          <Dialog>
+      <Dialog>
+        <HoverCard openDelay={250} closeDelay={150}>
+          <HoverCardTrigger asChild>
             <DialogTrigger asChild>{triggerContent}</DialogTrigger>
+          </HoverCardTrigger>
 
-            <DialogContent
-              className="
-                fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2
-                w-[90vw] max-w-[640px] max-h-[80vh]
-                flex flex-col gap-0
-                rounded-lg border bg-background shadow-xl
-                p-0
-              "
-            >
-              <DialogHeader className="px-6 pt-6 pb-4 border-b">
-                <DialogTitle className="flex items-center gap-2 text-base">
-                  <Pin className="h-4 w-4 text-primary" />
-                  <span>근거 {index}</span>
-                </DialogTitle>
-                {section && (
-                  <DialogDescription className="text-sm text-muted-foreground mt-1">
-                    {section}
-                  </DialogDescription>
-                )}
-              </DialogHeader>
-
-              <div className="overflow-auto px-6 py-4 flex-1">
-                <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-                  {cleanBody || "원문 청크 내용이 없습니다."}
+          <HoverCardContent
+            side="top"
+            align="start"
+            className="w-[420px] max-w-[90vw]"
+          >
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                <Pin className="h-3 w-3" />
+                <span>근거 {index} · 미리보기</span>
+              </div>
+              {section && (
+                <div className="text-sm font-medium text-foreground">
+                  {section}
                 </div>
+              )}
+              <div className="text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
+                {preview}
               </div>
-            </DialogContent>
-          </Dialog>
-        </HoverCardTrigger>
+              <div className="pt-1 text-[11px] text-muted-foreground/80">
+                클릭하면 원문 전체 보기
+              </div>
+            </div>
+          </HoverCardContent>
+        </HoverCard>
 
-        <HoverCardContent
-          side="top"
-          align="start"
-          className="w-[420px] max-w-[90vw]"
+        <DialogContent
+          className="
+            fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2
+            w-[90vw] max-w-[640px] max-h-[80vh]
+            flex flex-col gap-0
+            rounded-lg border bg-background shadow-xl
+            p-0
+          "
         >
-          <div className="space-y-2">
-            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <Pin className="h-3 w-3" />
-              <span>근거 {index} · 미리보기</span>
-            </div>
+          <DialogHeader className="px-6 pt-6 pb-4 border-b">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Pin className="h-4 w-4 text-primary" />
+              <span>근거 {index}</span>
+            </DialogTitle>
             {section && (
-              <div className="text-sm font-medium text-foreground">
+              <DialogDescription className="text-sm text-muted-foreground mt-1">
                 {section}
-              </div>
+              </DialogDescription>
             )}
-            <div className="text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
-              {preview}
-            </div>
-            <div className="pt-1 text-[11px] text-muted-foreground/80">
-              클릭하면 원문 전체 보기
+          </DialogHeader>
+
+          <div className="overflow-auto px-6 py-4 flex-1">
+            <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+              {cleanBody || "원문 청크 내용이 없습니다."}
             </div>
           </div>
-        </HoverCardContent>
-      </HoverCard>
+        </DialogContent>
+      </Dialog>
     </li>
   );
 }
