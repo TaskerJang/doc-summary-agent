@@ -160,9 +160,10 @@ async def _call_qa(user_prompt: str) -> str:
 
 
 class SourceItem:
-    def __init__(self, section: str, snippet: str):
-        self.section = section
-        self.snippet = snippet
+    def __init__(self, section: str, snippet: str, full_chunk: str = ""):
+        self.section    = section
+        self.snippet    = snippet
+        self.full_chunk = full_chunk
 
 
 class QAResult:
@@ -310,16 +311,39 @@ def _build_context(
     return "\n\n".join(parts)
 
 
-def _make_sources(answer: str, relevant_sections: list) -> list[SourceItem]:
+def _make_sources(
+    answer: str,
+    relevant_sections: list,
+    relevant_chunks: list[str],
+) -> list[SourceItem]:
+    """
+    출처 아이템 생성.
+
+    relevant_sections와 relevant_chunks는 서로 다른 retrieval 파이프라인
+    (섹션 BM25 vs RRF+reranker)의 출력이라 순서 대응이 보장되지 않는다.
+    지금은 가장 단순한 인덱스 매칭(i번째 섹션 ↔ i번째 청크)으로 시작하고,
+    품질 이슈 발생 시 섹션명 기반 매칭·BM25 매칭으로 후속 개선한다. (#111)
+
+    중복 섹션명이 스킵된 경우 해당 인덱스의 full_chunk도 결과에서 빠질 수
+    있으나(번호 비연속), 실제 중복 스킵은 드물어 현 단계에선 허용.
+
+    relevant_chunks 길이가 부족하면 full_chunk=""로 세팅 → UI 레이어에서
+    해당 링크 생략.
+    """
     seen: set[str] = set()
     result = []
-    for sec in relevant_sections:
+    for i, sec in enumerate(relevant_sections):
         key = sec.section.strip()
         if key in seen:
             continue
         seen.add(key)
-        snippet = _fix_tilde(_best_bullet_by_answer(answer, sec.bullets))
-        result.append(SourceItem(section=key, snippet=snippet))
+        snippet    = _fix_tilde(_best_bullet_by_answer(answer, sec.bullets))
+        full_chunk = relevant_chunks[i] if i < len(relevant_chunks) else ""
+        result.append(SourceItem(
+            section=key,
+            snippet=snippet,
+            full_chunk=full_chunk,
+        ))
     return result
 
 
@@ -359,7 +383,7 @@ async def ask(
             raw = await _call_qa(user_prompt)
 
             if not _is_unanswerable(raw):
-                sources = _make_sources(raw, relevant_sections)
+                sources = _make_sources(raw, relevant_sections, relevant_chunks)
                 logger.info("Q&A 완료 — 출처 %d개", len(sources))
                 return QAResult(answer=raw, sources=sources, is_answerable=True)
 
