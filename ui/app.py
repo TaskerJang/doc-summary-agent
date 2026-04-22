@@ -102,18 +102,24 @@ async def _send_qa_answer(qa_result) -> None:
 
     흐름:
       1) 답변 본문 스트리밍
-      2) 📌 출처 블록 (섹션명 + snippet) — 기존 동작
-      3) 원문 근거 — SourceReference 커스텀 엘리먼트 1개에 근거 배열 전체 전달 (#111)
+      2) 출처 + 원문 근거 — SourceReference 커스텀 엘리먼트 하나에 통합 (#111)
 
     원래 설계는 cl.Text(display="page") 풀스크린 오버레이였으나
-    chainlit/chainlit#1559, #1827 등에서 확인된 업스트림 버그로 작동 불가.
-    대안으로 public/elements/SourceReference.jsx + shadcn Dialog로
-    "버튼 클릭 → 팝업 → 바깥 클릭/ESC로 닫힘" UX를 구현.
+    chainlit/chainlit#1559, #1827 업스트림 버그로 작동 불가.
+    대안으로 마크다운 출처 블록 + 개별 "근거 N" 버튼을 띄우는 방식을 거쳤으나
+    (a) 거추장스러운 버튼 블록, (b) msg.elements 순서 미보장 (chainlit#2202)
+    문제가 있어 최종적으로:
 
-    엔엘리먼트 여러 개를 msg.elements = [...]로 넣으면 Chainlit이
-    렌더링 순서를 보장하지 않는 이슈(chainlit/chainlit#2202)가 있어,
-    근거 배열 전체를 items props로 넣은 CustomElement 1개만 보내고
-    JSX 내부에서 .map()으로 순서상 렌더한다.
+      - 마크다운 "📌 출처" 블록 제거
+      - 개별 "근거 N" 버튼 블록 제거
+      - 출처 전체를 단일 CustomElement(SourceReference)에 items 배열로 전달
+      - JSX 내부에서 번호 뱃지 + 섹션명 + snippet을 한 줄 버튼으로 렌더
+      - 호버 → HoverCard로 원문 앞부분 미리보기
+      - 클릭 → Dialog 모달로 원문 전체 보기
+
+    Perplexity/Granola/Sana 스타일 "claim-to-source" UX에 가까움.
+    단일 엘리먼트라 Chainlit 내부 순서 미보장 이슈에도 영향받지 않음 —
+    React가 items.map()의 렌더링 순서를 보장.
     """
     msg = cl.Message(content="")
     await msg.send()
@@ -127,35 +133,17 @@ async def _send_qa_answer(qa_result) -> None:
     await _stream_by_lines(msg, answer)
 
     if qa_result.sources:
-        # ── 출처 (섹션명 + snippet) — 기존 동작 유지 ────────────────
-        lines = []
-        for i, s in enumerate(qa_result.sources):
-            section = _clean(s.section)
-            snippet = s.snippet.strip() if s.snippet else ""
-            if snippet:
-                lines.append(f"`{i+1}` **{section}** — {snippet}")
-            else:
-                lines.append(f"`{i+1}` **{section}**")
-
-        footer = "\n\n---\n📌 **출처**\n" + "\n".join(lines)
-
-        # ── 원문 근거 — SourceReference 하나에 items 배열 전달 ───────────
-        # full_chunk가 비어있는 항목은 제외 (overall fallback 주 경로는
-        # sources=[]라 여기까지 오지도 않음)
+        # 출처/근거 items 빌드 — 섹션명, snippet, 원문 청크 전부 JSX에 위임.
+        # full_chunk가 비어있어도 JSX가 호버/클릭 없이 정보만 렌더하는
+        # fallback을 가지고 있어 여기서 필터링하지 않는다.
         items = []
         for i, s in enumerate(qa_result.sources):
-            if not s.full_chunk:
-                continue
             items.append({
                 "index":     i + 1,
                 "section":   _clean(s.section),
-                "fullChunk": s.full_chunk.strip(),
+                "snippet":   _fix_tilde(s.snippet.strip()) if s.snippet else "",
+                "fullChunk": s.full_chunk.strip() if s.full_chunk else "",
             })
-
-        if items:
-            footer += "\n\n**원문 근거**"
-
-        await msg.stream_token(footer)
 
         if items:
             msg.elements = [
