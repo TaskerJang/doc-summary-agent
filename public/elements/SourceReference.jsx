@@ -1,17 +1,21 @@
 // public/elements/SourceReference.jsx
 //
-// Q&A 원문 근거 팝업 모달 모음.
-// 메시지에 엔엘리먼트를 여러 개 붙이는 대신 배열 props(items)를 받은
-// 단일 CustomElement에서 .map()으로 버튼들을 렬더한다. 이유는
-// chainlit/chainlit#2202 — msg.elements 배열의 순서가 렌더링 순서로
-// 보장되지 않는 이슈. 하나의 엔엘리먼트 안에서 map 돌리면
-// React가 이 순서를 그대로 지키므로 근거 1/2/3이 항상 순서대로
-// 렌더된다.
+// Q&A 답변의 출처 리스트 — 호버 미리보기 + 클릭 전체 원문 모달.
 //
-// props.items: Array<{ index: int, section: string, fullChunk: string }>
+// Perplexity/Granola/Sana 같은 프로덕트들의 "claim-to-source" UX를 따름:
+//   - 출처를 답변 아래 번호 뱃지 + 섹션명 + snippet 한 줄로 표시
+//   - 호버 시 HoverCard 팝오버로 원문 청크 앞부분 미리보기
+//   - 클릭 시 shadcn Dialog 모달로 원문 청크 전체 표시 (ESC/바깥/X로 닫힘)
 //
-// 각 항목은 shadcn Dialog로 팝업 모달. ESC/바깥 클릭/우상단 X로 닫힘.
-// (#111)
+// 단일 엘리먼트 안에서 전체 items를 map으로 렌더하므로 Chainlit의
+// msg.elements 순서 미보장 이슈(chainlit#2202)에 영향받지 않는다.
+//
+// props.items: Array<{
+//   index: int,
+//   section: string,
+//   snippet: string,     // ui/app.py qa_result.sources[i].snippet (요약 섹션 불릿)
+//   fullChunk: string,   // reranker top-3 원문 청크 본문
+// }>
 
 import {
   Dialog,
@@ -21,8 +25,12 @@ import {
   DialogDescription,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { FileText } from "lucide-react";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
+import { Pin } from "lucide-react";
 
 /**
  * 청크 본문에 섞여있는 마크다운 artifact 제거.
@@ -44,57 +52,132 @@ function stripMarkdown(text) {
     .trim();
 }
 
-function SourceDialog({ item }) {
-  const { index, section, fullChunk } = item;
-  const cleanBody = stripMarkdown(fullChunk);
+/** 호버 팝오버용 짧은 미리보기 (앞 240자, 공백 정리) */
+function buildPreview(fullChunk, maxLen = 240) {
+  const clean = stripMarkdown(fullChunk).replace(/\s+/g, " ");
+  if (clean.length <= maxLen) return clean;
+  return clean.slice(0, maxLen).trimEnd() + "…";
+}
 
-  return (
-    <Dialog>
-      <DialogTrigger asChild>
-        <Button
-          variant="outline"
-          size="sm"
-          className="mr-2 mb-2 gap-1.5"
-        >
-          <FileText className="h-3.5 w-3.5" />
-          <span>근거 {index}</span>
-        </Button>
-      </DialogTrigger>
+function SourceItem({ item }) {
+  const {
+    index = 1,
+    section = "",
+    snippet = "",
+    fullChunk = "",
+  } = item || {};
+  const hasFullChunk = Boolean(fullChunk);
+  const preview = hasFullChunk ? buildPreview(fullChunk) : "";
+  const cleanBody = hasFullChunk ? stripMarkdown(fullChunk) : "";
 
-      {/*
-       * 중앙 정렬 카드 스타일을 Chainlit 기본 스타일보다 우선시하기 위해
-       * 명시적 픽셀 폭 + top/left 50% + translate 로 덼어쓴다. Chainlit이
-       * DialogContent에 top:0 같은 스타일을 주입해 상단 가로 바 형태로
-       * 렌더되던 문제를 해결.
-       */}
-      <DialogContent
+  // 번호 뱃지 + 섹션명 + snippet을 한 줄에 표시하는 클릭 가능한 버튼.
+  // 이 자체가 답변의 출처 항목 겸 근거 팝업 트리거.
+  const triggerContent = (
+    <button
+      type="button"
+      className="
+        w-full text-left group
+        flex items-start gap-2 py-1.5 px-2 -mx-2 rounded-md
+        transition-colors hover:bg-muted/60 focus-visible:bg-muted/60
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+        disabled:cursor-default disabled:hover:bg-transparent
+      "
+      disabled={!hasFullChunk}
+      aria-label={`근거 ${index}: ${section}`}
+    >
+      <span
         className="
-          fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2
-          w-[90vw] max-w-[640px] max-h-[80vh]
-          flex flex-col gap-0
-          rounded-lg border bg-background shadow-xl
-          p-0
+          shrink-0 inline-flex items-center justify-center
+          w-5 h-5 mt-0.5 rounded
+          bg-primary/10 text-primary
+          text-xs font-medium
+          group-hover:bg-primary/20
         "
       >
-        <DialogHeader className="px-6 pt-6 pb-4 border-b">
-          <DialogTitle className="flex items-center gap-2 text-base">
-            <span>📍</span>
-            <span>근거 {index}</span>
-          </DialogTitle>
-          {section && (
-            <DialogDescription className="text-sm text-muted-foreground mt-1">
-              {section}
-            </DialogDescription>
-          )}
-        </DialogHeader>
+        {index}
+      </span>
+      <span className="flex-1 min-w-0 text-sm leading-relaxed">
+        <span className="font-medium text-foreground">{section}</span>
+        {snippet && (
+          <>
+            <span className="text-muted-foreground"> — </span>
+            <span className="text-muted-foreground">{snippet}</span>
+          </>
+        )}
+      </span>
+    </button>
+  );
 
-        <div className="overflow-auto px-6 py-4 flex-1">
-          <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-            {cleanBody || "원문 청크 내용이 없습니다."}
+  // full_chunk 없으면 호버/클릭 인터랙션 없이 정보만 표시 (엣지케이스 방어).
+  // 이 경로는 현재 로직상 도달 어려움 — _make_sources가 relevant_chunks를
+  // 인덱스 매칭으로 채우고, overall fallback 주 경로는 sources=[]라 이
+  // 엘리먼트 자체가 렌더되지 않음. 장래 변경 대비 방어 코드.
+  if (!hasFullChunk) {
+    return <li className="list-none">{triggerContent}</li>;
+  }
+
+  return (
+    <li className="list-none">
+      <HoverCard openDelay={250} closeDelay={150}>
+        <HoverCardTrigger asChild>
+          <Dialog>
+            <DialogTrigger asChild>{triggerContent}</DialogTrigger>
+
+            <DialogContent
+              className="
+                fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2
+                w-[90vw] max-w-[640px] max-h-[80vh]
+                flex flex-col gap-0
+                rounded-lg border bg-background shadow-xl
+                p-0
+              "
+            >
+              <DialogHeader className="px-6 pt-6 pb-4 border-b">
+                <DialogTitle className="flex items-center gap-2 text-base">
+                  <Pin className="h-4 w-4 text-primary" />
+                  <span>근거 {index}</span>
+                </DialogTitle>
+                {section && (
+                  <DialogDescription className="text-sm text-muted-foreground mt-1">
+                    {section}
+                  </DialogDescription>
+                )}
+              </DialogHeader>
+
+              <div className="overflow-auto px-6 py-4 flex-1">
+                <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+                  {cleanBody || "원문 청크 내용이 없습니다."}
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+        </HoverCardTrigger>
+
+        <HoverCardContent
+          side="top"
+          align="start"
+          className="w-[420px] max-w-[90vw]"
+        >
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <Pin className="h-3 w-3" />
+              <span>근거 {index} · 미리보기</span>
+            </div>
+            {section && (
+              <div className="text-sm font-medium text-foreground">
+                {section}
+              </div>
+            )}
+            <div className="text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
+              {preview}
+            </div>
+            <div className="pt-1 text-[11px] text-muted-foreground/80">
+              클릭하면 원문 전체 보기
+            </div>
           </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+        </HoverCardContent>
+      </HoverCard>
+    </li>
   );
 }
 
@@ -104,10 +187,16 @@ export default function SourceReference() {
   if (!items.length) return null;
 
   return (
-    <div className="flex flex-wrap items-center">
-      {items.map((item) => (
-        <SourceDialog key={item.index} item={item} />
-      ))}
+    <div className="mt-4 pt-4 border-t border-border/60">
+      <div className="flex items-center gap-1.5 mb-2 text-sm font-medium text-foreground">
+        <Pin className="h-3.5 w-3.5 text-primary" />
+        <span>출처</span>
+      </div>
+      <ul className="space-y-0.5">
+        {items.map((it) => (
+          <SourceItem key={it.index} item={it} />
+        ))}
+      </ul>
     </div>
   );
 }
