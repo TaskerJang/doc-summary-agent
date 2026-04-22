@@ -1,13 +1,17 @@
 // public/elements/SourceReference.jsx
 //
-// Q&A 답변의 출처 리스트 — 호버 미리보기 + 클릭 전체 원문 모달.
+// Q&A 답변의 출처 리스트 — 호버 미리보기 + CTA 버튼 클릭으로 전체 원문 모달.
 //
-// Perplexity/Granola/Sana 같은 프로덕트들의 "claim-to-source" UX를 따름:
-//   - 출처를 답변 아래 번호 뱃지 + 섹션명 + snippet 한 줄로 표시
-//   - 호버 시 HoverCard 팝오버로 원문 청크 앞부분 미리보기
-//   - 클릭 시 shadcn Dialog 모달로 원문 청크 전체 표시 (ESC/바깥/X로 닫힘)
+// UX 분리 (#111):
+//   - 근거 텍스트 항목: 호버 시 팝오버 미리보기만 뜸 (클릭해도 아무 일 없음)
+//   - 팝오버 내 "원문 전체 보기" 버튼: 클릭 시 shadcn Dialog 모달 오픈
+//   - ESC/바깥 클릭/X로 모달 닫힘 (Dialog 기본 동작)
 //
-// 단일 엘리먼트 안에서 전체 items를 map으로 렌더하므로 Chainlit의
+// 이전엔 근거 텍스트 버튼 자체가 호버(팝오버)와 클릭(모달)을 모두 받아
+// 텍스트 클릭만 해도 바로 모달이 떴다. 의도와 다르므로 트리거를 분리:
+// HoverCardTrigger는 근거 텍스트에, DialogTrigger는 팝오버 내 CTA 버튼에만.
+//
+// 단일 CustomElement로 전체 items를 map하여 렌더하므로 Chainlit의
 // msg.elements 순서 미보장 이슈(chainlit#2202)에 영향받지 않는다.
 //
 // props.items: Array<{
@@ -52,8 +56,8 @@ function stripMarkdown(text) {
     .trim();
 }
 
-/** 호버 팝오버용 짧은 미리보기 (앞 240자, 공백 정리) */
-function buildPreview(fullChunk, maxLen = 240) {
+/** 호버 팝오버용 짧은 미리보기 (앞 180자, 공백 정리) */
+function buildPreview(fullChunk, maxLen = 180) {
   const clean = stripMarkdown(fullChunk).replace(/\s+/g, " ");
   if (clean.length <= maxLen) return clean;
   return clean.slice(0, maxLen).trimEnd() + "…";
@@ -70,19 +74,17 @@ function SourceItem({ item }) {
   const preview = hasFullChunk ? buildPreview(fullChunk) : "";
   const cleanBody = hasFullChunk ? stripMarkdown(fullChunk) : "";
 
-  // 번호 뱃지 + 섹션명 + snippet을 한 줄에 표시하는 클릭 가능한 버튼.
-  // 이 자체가 답변의 출처 항목 겸 근거 팝업 트리거.
-  const triggerContent = (
-    <button
-      type="button"
+  // 번호 뱃지 + 섹션명 + snippet 한 줄의 근거 항목.
+  // <button>이 아닌 <div role="presentation">으로 두어 클릭 의도 제거 —
+  // 호버 시에만 팝오버가 뜨고, 모달은 팝오버 내 CTA 버튼을 통해서만 열린다.
+  const rowContent = (
+    <div
       className="
         w-full text-left group
         flex items-start gap-2 py-1.5 px-2 -mx-2 rounded-md
-        transition-colors hover:bg-muted/60 focus-visible:bg-muted/60
-        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
-        disabled:cursor-default disabled:hover:bg-transparent
+        transition-colors hover:bg-muted/60
+        cursor-default
       "
-      disabled={!hasFullChunk}
       aria-label={`근거 ${index}: ${section}`}
     >
       <span
@@ -105,61 +107,32 @@ function SourceItem({ item }) {
           </>
         )}
       </span>
-    </button>
+    </div>
   );
 
   // full_chunk 없으면 호버/클릭 인터랙션 없이 정보만 표시 (엣지케이스 방어).
   if (!hasFullChunk) {
-    return <li className="list-none">{triggerContent}</li>;
+    return <li className="list-none">{rowContent}</li>;
   }
 
-  // Dialog와 HoverCard의 asChild 중첩 문제 회피:
-  // 이전엔 <HoverCardTrigger asChild><Dialog>...</Dialog></HoverCardTrigger>
-  // 구조였는데, Radix의 asChild가 ref/이벤트를 자식 하나에 병합하려고 하다가
-  // 중첩 시 내부 DialogTrigger의 ref forwarding과 꼬여 HoverCard가 아예
-  // 작동하지 않았다. 공식 shadcn 패턴대로 Dialog는 최상위에 두고
-  // DialogTrigger + HoverCardTrigger를 같은 버튼 하나에 겹쳐 바인딩한다.
-  //
-  // 구조:
-  //   <Dialog>
-  //     <HoverCard>
-  //       <HoverCardTrigger asChild>
-  //         <DialogTrigger asChild>
-  //           <button>...</button>  ← 두 Trigger가 이 버튼 하나에 병합
-  //         </DialogTrigger>
-  //       </HoverCardTrigger>
-  //       <HoverCardContent>...</HoverCardContent>
-  //     </HoverCard>
-  //     <DialogContent>...</DialogContent>
-  //   </Dialog>
-  //
-  // 이러면 버튼 하나가 hover와 click 이벤트를 모두 받고, Radix가 내부적으로
-  // Slot 패턴으로 두 Trigger를 병합한다.
+  // Dialog는 최상위에 두고, DialogTrigger는 팝오버 안의 "원문 전체 보기"
+  // 버튼에 둔다. HoverCard는 근거 텍스트 줄에 걸리고, 두 트리거가 분리되어
+  // 의도한 UX:
+  //   근거 텍스트 호버 → 팝오버 표시 (클릭해도 모달 안 뜸)
+  //   팝오버 내 CTA 버튼 클릭 → 모달 표시
   return (
     <li className="list-none">
       <Dialog>
         <HoverCard openDelay={250} closeDelay={150}>
-          <HoverCardTrigger asChild>
-            <DialogTrigger asChild>{triggerContent}</DialogTrigger>
-          </HoverCardTrigger>
+          <HoverCardTrigger asChild>{rowContent}</HoverCardTrigger>
 
           <HoverCardContent
             side="top"
             align="start"
-            className="w-[420px] max-w-[90vw] p-0 overflow-hidden"
+            className="w-[320px] max-w-[90vw] p-0 overflow-hidden"
           >
-            {/*
-             * 헤더: 번호 뱃지 + "미리보기" 라벨
-             * 본문: 섹션명 + 원문 앞 240자 미리보기
-             * 푸터: "원문 전체 보기" CTA 버튼 — 시각적으로 분리하여
-             *       클릭 가능한 요소임을 명확히 한다.
-             *
-             * 이전엔 푸터가 본문 하단 여백에 작은 회색 텍스트로 있어서
-             * 근거 내용 일부처럼 보였다. border-t로 구분선 추가 + primary
-             * 컬러 배경 + 아이콘으로 CTA 버튼 정체성 강화.
-             */}
-            <div className="p-3 space-y-2">
-              <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <div className="p-3 space-y-1.5">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
                 <Pin className="h-3 w-3" />
                 <span>근거 {index} · 미리보기</span>
               </div>
@@ -173,16 +146,26 @@ function SourceItem({ item }) {
               </div>
             </div>
 
-            <div
-              className="
-                flex items-center justify-center gap-1.5
-                px-3 py-2 border-t border-border/60
-                bg-primary/5 text-primary text-xs font-medium
-              "
-            >
-              <Maximize2 className="h-3 w-3" />
-              <span>클릭하면 원문 전체 보기</span>
-            </div>
+            {/*
+             * 팝오버 하단 CTA 버튼 — 이것만 DialogTrigger.
+             * border-t + bg-primary/5로 본문과 시각 분리, 클릭 가능성을 명확화.
+             */}
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="
+                  w-full flex items-center justify-center gap-1.5
+                  px-3 py-2 border-t border-border/60
+                  bg-primary/5 hover:bg-primary/10
+                  text-primary text-xs font-medium
+                  transition-colors
+                  focus-visible:outline-none focus-visible:bg-primary/10
+                "
+              >
+                <Maximize2 className="h-3 w-3" />
+                <span>원문 전체 보기</span>
+              </button>
+            </DialogTrigger>
           </HoverCardContent>
         </HoverCard>
 
