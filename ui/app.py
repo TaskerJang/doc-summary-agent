@@ -191,30 +191,36 @@ async def _render_charts(summary: SummaryResult) -> None:
 
 
 async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
-    """PDF 원문을 사이드 패널로 전송.
+    """PDF 원문을 사이드 패널 트리거 메시지로 전송.
+
+    메시지 content의 {filename} 부분이 element name과 매칭되어 클릭 가능한
+    링크로 변환된다(Chainlit element ↔ content 매칭 규약). 사용자가 그
+    링크를 클릭해야 비로소 오른쪽 사이드 패널이 열린다.
+
+    display="inline" 사용 이유 (#111):
+    이전엔 display="side"였는데, side 모드는 메시지가 도착하자마자 사이드
+    패널이 자동으로 열려 답변/출처 영역 공간을 차지했다. inline으로 바꾸면
+    메시지 안에 PDF 뷰어 카드가 인라인으로 렌더되고, 사이드 패널은 사용자가
+    명시적으로 열 때까지 뜨지 않는다. 이로써 "기본은 닫혀 있고, 필요할 때만
+    여는" on-demand UX가 된다.
 
     blob_storage 미설정 환경에서 create_element가 경고만 뿌리고 지나가므로
     시도해볼 가치가 있음. 만약 실제로 블로킹되면 PDF_SEND_TIMEOUT에서 끊긴다.
     resume 시 복원은 blob_storage 연결(#101) 후에만 가능.
-
-    on-demand 패턴으로 변경 (#111):
-    업로드 직후 자동 전송이 아니라, 사용자가 "📂 PDF 원문 열기" 액션 버튼을
-    클릭해야 호출된다. 기본 화면에 PDF 사이드 패널이 뜨지 않아 답변과 출처
-    영역이 방해받지 않는다.
     """
     try:
         await asyncio.wait_for(
             cl.Message(
                 content=f"📂 원문 보기 — {filename}",
-                elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)],
+                elements=[cl.Pdf(name=filename, display="inline", path=str(tmp_path), page=1)],
             ).send(),
             timeout=PDF_SEND_TIMEOUT,
         )
-        logger.info("PDF 사이드 패널 전송 완료: %s", filename)
+        logger.info("PDF 인라인 뷰어 전송 완료: %s", filename)
     except asyncio.TimeoutError:
-        logger.warning("PDF 사이드 패널 전송 타임아웃 (%ds 초과): %s", PDF_SEND_TIMEOUT, filename)
+        logger.warning("PDF 뷰어 전송 타임아웃 (%ds 초과): %s", PDF_SEND_TIMEOUT, filename)
     except Exception as e:
-        logger.warning("PDF 사이드 패널 전송 실패: %s — %s", filename, e)
+        logger.warning("PDF 뷰어 전송 실패: %s — %s", filename, e)
 
 
 def _index_in_background(chunks: list[dict], doc_id: str) -> None:
@@ -284,8 +290,6 @@ async def on_chat_start():
     cl.user_session.set("result", None)
     cl.user_session.set("raw_chunks", [])
     cl.user_session.set("doc_id", None)
-    cl.user_session.set("pdf_path", None)
-    cl.user_session.set("pdf_filename", None)
     settings = await cl.ChatSettings([
         Switch(id="chart_enabled", label="차트 자동 생성",
                description="문서 분석 후 수치 데이터를 Plotly 차트로 자동 렌더링합니다.", initial=True),
@@ -401,13 +405,6 @@ async def on_message(message: cl.Message):
         cl.user_session.set("result", step3)
         cl.user_session.set("raw_chunks", raw_chunks)
         cl.user_session.set("doc_id", doc_id)
-        # PDF 경로/파일명을 세션에 저장 — on-demand PDF 사이드 패널 호출 시 사용
-        if tmp_path.suffix.lower() == ".pdf":
-            cl.user_session.set("pdf_path", str(tmp_path))
-            cl.user_session.set("pdf_filename", filename)
-        else:
-            cl.user_session.set("pdf_path", None)
-            cl.user_session.set("pdf_filename", None)
         summary = _to_summary_result(step3)
 
         # 전체 요약
@@ -425,22 +422,16 @@ async def on_message(message: cl.Message):
         if summary:
             await _render_charts(summary)
 
-        # PDF 원문 열기 액션 버튼 — on-demand로 사이드 패널 여는 트리거
-        # 업로드 직후 자동으로 _send_pdf_side_panel을 호출하지 않고,
-        # 사용자가 클릭해야 열리도록 변경 (#111).
-        # 기본 화면에서 PDF가 오른쪽을 차지하지 않게 되어 답변/출처 영역을
-        # 더 넓게 볼 수 있다.
-        post_actions = []
+        # PDF 원문 — 업로드된 파일 경로를 메시지로 전송해 사용자가 클릭해 볼 수
+        # 있게 한다. _send_pdf_side_panel은 display="inline"이라 메시지 도착 시점에
+        # 사이드 패널을 자동으로 열지 않는다. 답변/출처 영역 공간을 방해하지 않음.
+        # 실패/타임아웃 시 graceful skip (PDF_SEND_TIMEOUT=5s).
+        # resume 시 복원은 blob_storage 연결(#101) 후에만 가능.
         if tmp_path.suffix.lower() == ".pdf":
-            post_actions.append(
-                cl.Action(name="open_pdf", payload={}, label="📂 PDF 원문 열기")
-            )
+            await _send_pdf_side_panel(filename, tmp_path)
 
         # 추천 질문 버튼 (cl.Action) — SQLAlchemy 환경에서 재시도
-        follow_up_actions = _build_follow_ups(summary)
-
-        # PDF 열기 + 추천 질문을 한 메시지에 묶어서 표시
-        actions = post_actions + follow_up_actions
+        actions = _build_follow_ups(summary)
         await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
 
         # reranker 사전 워밍업 (fire-and-forget) — 첫 Q&A cold start 제거 (#109)
@@ -465,23 +456,3 @@ async def on_followup(action: cl.Action):
     question = action.payload["value"]
     await cl.Message(content=question, author="user").send()
     await _run_qa(question)
-
-
-@cl.action_callback("open_pdf")
-async def on_open_pdf(action: cl.Action):
-    """📂 PDF 원문 열기 버튼 클릭 시 호출.
-
-    업로드 시점에 세션에 저장해둔 pdf_path/pdf_filename을 읽어
-    _send_pdf_side_panel 호출. 경로가 없거나 파일이 더 이상 없으면
-    graceful skip 후 사용자에게 안내. (#111)
-    """
-    pdf_path     = cl.user_session.get("pdf_path")
-    pdf_filename = cl.user_session.get("pdf_filename")
-    if not pdf_path or not pdf_filename:
-        await cl.Message(content="⚠️ 현재 세션에 PDF 원문이 없습니다.").send()
-        return
-    path = Path(pdf_path)
-    if not path.exists():
-        await cl.Message(content=f"⚠️ PDF 파일을 찾을 수 없습니다: {pdf_filename}").send()
-        return
-    await _send_pdf_side_panel(pdf_filename, path)
