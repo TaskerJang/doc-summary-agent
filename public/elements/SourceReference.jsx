@@ -1,18 +1,17 @@
 // public/elements/SourceReference.jsx
 //
-// Q&A 답변의 원문 근거 팝업 모달.
-// 메시지 인라인에 "📄 근거 N" 버튼으로 렌더되고, 클릭 시 shadcn Dialog로
-// 중앙 정렬 카드 형태의 모달이 열린다. ESC/바깥 클릭/우상단 X로 닫힘은
-// Dialog 기본 동작. (#111)
+// Q&A 원문 근거 팝업 모달 모음.
+// 메시지에 엔엘리먼트를 여러 개 붙이는 대신 배열 props(items)를 받은
+// 단일 CustomElement에서 .map()으로 버튼들을 렬더한다. 이유는
+// chainlit/chainlit#2202 — msg.elements 배열의 순서가 렌더링 순서로
+// 보장되지 않는 이슈. 하나의 엔엘리먼트 안에서 map 돌리면
+// React가 이 순서를 그대로 지키므로 근거 1/2/3이 항상 순서대로
+// 렌더된다.
 //
-// Chainlit이 public/elements/*.jsx를 자동 로드하고 shadcn + tailwind
-// 환경을 제공한다 (https://docs.chainlit.io/api-reference/elements/custom).
-// props는 전역 주입 — 함수 인자로 받지 않는다.
+// props.items: Array<{ index: int, section: string, fullChunk: string }>
 //
-// 예상 props:
-//   index:     int    — 근거 번호 (1부터)
-//   section:   string — 섹션명
-//   fullChunk: string — 원문 청크 본문 (파서가 남긴 마크다운 artifact 포함 가능)
+// 각 항목은 shadcn Dialog로 팝업 모달. ESC/바깥 클릭/우상단 X로 닫힘.
+// (#111)
 
 import {
   Dialog,
@@ -29,7 +28,7 @@ import { FileText } from "lucide-react";
  * 청크 본문에 섞여있는 마크다운 artifact 제거.
  *
  * 청크는 파서가 문서 구조를 인식하면서 ##, **, -, ` 같은 마크다운 기호를
- * 남긴 상태로 저장된다. 원문 검증 UX에선 이 기호들이 노이즈로 보여 가독성을
+ * 남긴 상태로 저장된다. 원문 검증 UX엔 이 기호들이 노이즈로 보여 가독성을
  * 해치므로 제거한다. 표/리스트의 구조 손실은 감수 — 구조까지 확인하려면
  * 기존 PDF 사이드 패널을 쓰면 된다.
  */
@@ -45,8 +44,8 @@ function stripMarkdown(text) {
     .trim();
 }
 
-export default function SourceReference() {
-  const { index = 1, section = "", fullChunk = "" } = props || {};
+function SourceDialog({ item }) {
+  const { index, section, fullChunk } = item;
   const cleanBody = stripMarkdown(fullChunk);
 
   return (
@@ -64,7 +63,7 @@ export default function SourceReference() {
 
       {/*
        * 중앙 정렬 카드 스타일을 Chainlit 기본 스타일보다 우선시하기 위해
-       * 명시적 픽셀 폭 + top/left 50% + translate 로 덮어쓴다. Chainlit이
+       * 명시적 픽셀 폭 + top/left 50% + translate 로 덼어쓴다. Chainlit이
        * DialogContent에 top:0 같은 스타일을 주입해 상단 가로 바 형태로
        * 렌더되던 문제를 해결.
        */}
@@ -96,5 +95,19 @@ export default function SourceReference() {
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+export default function SourceReference() {
+  const { items = [] } = props || {};
+
+  if (!items.length) return null;
+
+  return (
+    <div className="flex flex-wrap items-center">
+      {items.map((item) => (
+        <SourceDialog key={item.index} item={item} />
+      ))}
+    </div>
   );
 }

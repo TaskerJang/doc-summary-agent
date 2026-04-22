@@ -103,15 +103,17 @@ async def _send_qa_answer(qa_result) -> None:
     흐름:
       1) 답변 본문 스트리밍
       2) 📌 출처 블록 (섹션명 + snippet) — 기존 동작
-      3) 원문 근거 — SourceReference 커스텀 엘리먼트(shadcn Dialog 팝업) (#111)
+      3) 원문 근거 — SourceReference 커스텀 엘리먼트 1개에 근거 배열 전체 전달 (#111)
 
     원래 설계는 cl.Text(display="page") 풀스크린 오버레이였으나
-    chainlit/chainlit#1559, #1827에서 확인된 업스트림 버그로 작동 불가.
-    대안으로 public/elements/SourceReference.jsx + shadcn Dialog를 통해
-    "클릭하면 팝업 → 바깥 클릭/ESC로 닫힘" UX를 구현.
+    chainlit/chainlit#1559, #1827 등에서 확인된 업스트림 버그로 작동 불가.
+    대안으로 public/elements/SourceReference.jsx + shadcn Dialog로
+    "버튼 클릭 → 팝업 → 바깥 클릭/ESC로 닫힘" UX를 구현.
 
-    Perplexity/NotebookLM 등 업계 표준 RAG 출처 표시 패턴
-    (인라인 숫자 + 클릭 → 원본 팝업) 과 유사한 UX.
+    엔엘리먼트 여러 개를 msg.elements = [...]로 넣으면 Chainlit이
+    렌더링 순서를 보장하지 않는 이슈(chainlit/chainlit#2202)가 있어,
+    근거 배열 전체를 items props로 넣은 CustomElement 1개만 보내고
+    JSX 내부에서 .map()으로 순서상 렌더한다.
     """
     msg = cl.Message(content="")
     await msg.send()
@@ -125,7 +127,7 @@ async def _send_qa_answer(qa_result) -> None:
     await _stream_by_lines(msg, answer)
 
     if qa_result.sources:
-        # ── 출처 (섹션명 + snippet) — 기존 동작 유지 ────────────────────
+        # ── 출처 (섹션명 + snippet) — 기존 동작 유지 ────────────────
         lines = []
         for i, s in enumerate(qa_result.sources):
             section = _clean(s.section)
@@ -137,32 +139,32 @@ async def _send_qa_answer(qa_result) -> None:
 
         footer = "\n\n---\n📌 **출처**\n" + "\n".join(lines)
 
-        # ── 원문 근거 — SourceReference 커스텀 엘리먼트 ─────────────────
-        # full_chunk가 비어있으면 버튼 생략 (overall fallback 주 경로는
+        # ── 원문 근거 — SourceReference 하나에 items 배열 전달 ───────────
+        # full_chunk가 비어있는 항목은 제외 (overall fallback 주 경로는
         # sources=[]라 여기까지 오지도 않음)
-        reference_elements = []
+        items = []
         for i, s in enumerate(qa_result.sources):
             if not s.full_chunk:
                 continue
-            reference_elements.append(
-                cl.CustomElement(
-                    name="SourceReference",
-                    display="inline",
-                    props={
-                        "index":     i + 1,
-                        "section":   _clean(s.section),
-                        "fullChunk": s.full_chunk.strip(),
-                    },
-                )
-            )
+            items.append({
+                "index":     i + 1,
+                "section":   _clean(s.section),
+                "fullChunk": s.full_chunk.strip(),
+            })
 
-        if reference_elements:
+        if items:
             footer += "\n\n**원문 근거**"
 
         await msg.stream_token(footer)
 
-        if reference_elements:
-            msg.elements = reference_elements
+        if items:
+            msg.elements = [
+                cl.CustomElement(
+                    name="SourceReference",
+                    display="inline",
+                    props={"items": items},
+                )
+            ]
 
     await msg.update()
 
