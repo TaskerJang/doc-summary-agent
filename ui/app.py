@@ -198,6 +198,33 @@ def _index_in_background(chunks: list[dict], doc_id: str) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _warmup_reranker_in_background() -> None:
+    """별도 스레드에서 reranker 싱글턴을 미리 로드 (fire-and-forget).
+
+    업로드 완료 직후 호출. 사용자가 요약/차트를 읽는 자연 대기 시간(30s~1min)에
+    bge-reranker-v2-m3 모델을 미리 싱글턴으로 로드해두어 첫 Q&A의 cold start를
+    제거한다. (#109)
+
+    bge-reranker-v2-m3도 bge-m3와 같은 sentence-transformers 계열이라 CPU 연산으로
+    GIL을 길게 잡으므로 asyncio.to_thread 금지. threading.Thread로 완전히 분리.
+    실패 시 graceful skip — Q&A 시점에 _aget_reranker가 다시 시도하지는 않지만
+    (sentinel 처리) reranking 스킵 후 RRF 결과가 그대로 LLM 컨텍스트로 전달되어
+    Q&A 자체는 정상 동작한다.
+    (선례: _index_in_background)
+    """
+    import threading
+
+    def _run():
+        try:
+            from summarizer.qa import _get_reranker
+            _get_reranker()
+            logger.info("백그라운드 reranker 워밍업 완료")
+        except Exception as e:
+            logger.warning("백그라운드 reranker 워밍업 실패: %s", e)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 async def _run_qa(question: str) -> None:
     """Q&A 공통 실행 — on_message / on_followup 양쪽에서 사용."""
     result     = cl.user_session.get("result")
@@ -359,6 +386,12 @@ async def on_message(message: cl.Message):
         # 추천 질문 버튼 (cl.Action) — SQLAlchemy 환경에서 재시도
         actions = _build_follow_ups(summary)
         await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
+
+        # reranker 사전 워밍업 (fire-and-forget) — 첫 Q&A cold start 제거 (#109)
+        # 사용자가 요약/차트를 읽는 자연 대기 시간에 백그라운드 스레드에서
+        # bge-reranker-v2-m3 싱글턴을 미리 로드. 추천 질문 메시지 send 이후에
+        # 호출하여 업로드 플로우의 모든 스트리밍이 끝난 뒤 GIL 경합을 최소화.
+        _warmup_reranker_in_background()
         return
 
     # Q&A
