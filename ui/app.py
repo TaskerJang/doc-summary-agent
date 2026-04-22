@@ -97,17 +97,22 @@ def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     ]
 
 
-def _format_reference_block(full_chunk: str) -> str:
-    """원문 청크를 인용구(>)로 감싸 시각적으로 본문과 구분.
-
-    줄바꿈을 "\n> "로 치환하여 멀티라인 인용 처리. 빈 줄도 "> "로 유지해
-    마크다운 렌더러가 인용구 블록을 끊지 않도록 한다.
-    """
-    lines = full_chunk.splitlines()
-    return "\n".join(f"> {line}" if line else ">" for line in lines) if lines else f"> {full_chunk}"
-
-
 async def _send_qa_answer(qa_result) -> None:
+    """Q&A 답변 메시지 전송.
+
+    흐름:
+      1) 답변 본문 스트리밍
+      2) 📌 출처 블록 (섹션명 + snippet) — 기존 동작
+      3) 원문 근거 — SourceReference 커스텀 엘리먼트(shadcn Dialog 팝업) (#111)
+
+    원래 설계는 cl.Text(display="page") 풀스크린 오버레이였으나
+    chainlit/chainlit#1559, #1827에서 확인된 업스트림 버그로 작동 불가.
+    대안으로 public/elements/SourceReference.jsx + shadcn Dialog를 통해
+    "클릭하면 팝업 → 바깥 클릭/ESC로 닫힘" UX를 구현.
+
+    Perplexity/NotebookLM 등 업계 표준 RAG 출처 표시 패턴
+    (인라인 숫자 + 클릭 → 원본 팝업) 과 유사한 UX.
+    """
     msg = cl.Message(content="")
     await msg.send()
 
@@ -130,39 +135,34 @@ async def _send_qa_answer(qa_result) -> None:
             else:
                 lines.append(f"`{i+1}` **{section}**")
 
-        # ── 원문 근거 (reranker top-3 청크 본문) ───────────────────────
-        # 원래 이슈 #111 설계는 cl.Text(display="page") 풀스크린 오버레이였으나
-        # chainlit/chainlit#1559, #1827에서 확인된 대로 Chainlit의
-        # display="page" (및 display="side") 자체가 링크를 렌더하지 않는
-        # 버그가 있어 클릭 시 빈 화면이 뜬다. 해당 버그가 업스트림에서
-        # 해결되기 전까지는 인라인 마크다운으로 직접 펼쳐서 표시한다.
-        #
-        # <details>/<summary> HTML 태그로 접기 UX를 시도 — Chainlit 마크다운
-        # 렌더러가 HTML을 허용하면 기본 접힘 상태(MDN 명세상 <details>는
-        # open 속성 없으면 접힘)로 작동하고, 허용하지 않더라도 태그가
-        # 그대로 노출되지 않고 "항상 펼쳐진" 형태로 표시되어 기능 자체는
-        # 깨지지 않는다 (최악의 경우 스크롤이 길어질 뿐).
-        #
-        # 청크 본문은 인용구(>)로 감싸 답변 본문과 시각적으로 구분한다.
-        # full_chunk가 비어있으면 해당 근거를 생략 — overall fallback 주
-        # 경로는 sources=[]라 이 블록 자체가 렌더되지 않는다.
-        reference_blocks = []
+        footer = "\n\n---\n📌 **출처**\n" + "\n".join(lines)
+
+        # ── 원문 근거 — SourceReference 커스텀 엘리먼트 ─────────────────
+        # full_chunk가 비어있으면 버튼 생략 (overall fallback 주 경로는
+        # sources=[]라 여기까지 오지도 않음)
+        reference_elements = []
         for i, s in enumerate(qa_result.sources):
             if not s.full_chunk:
                 continue
-            section = _clean(s.section)
-            body    = _format_reference_block(s.full_chunk.strip())
-            reference_blocks.append(
-                f"<details>\n"
-                f"<summary>🔍 <b>근거 {i+1} · {section}</b></summary>\n\n"
-                f"{body}\n\n"
-                f"</details>"
+            reference_elements.append(
+                cl.CustomElement(
+                    name="SourceReference",
+                    display="inline",
+                    props={
+                        "index":     i + 1,
+                        "section":   _clean(s.section),
+                        "fullChunk": s.full_chunk.strip(),
+                    },
+                )
             )
 
-        footer = "\n\n---\n📌 **출처**\n" + "\n".join(lines)
-        if reference_blocks:
-            footer += "\n\n**원문 근거**\n\n" + "\n\n".join(reference_blocks)
+        if reference_elements:
+            footer += "\n\n**원문 근거**"
+
         await msg.stream_token(footer)
+
+        if reference_elements:
+            msg.elements = reference_elements
 
     await msg.update()
 
