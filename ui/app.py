@@ -193,16 +193,20 @@ async def _render_charts(summary: SummaryResult) -> None:
 async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
     """PDF 원문을 사이드 패널 트리거 메시지로 전송.
 
-    메시지 content의 {filename} 부분이 element name과 매칭되어 클릭 가능한
-    링크로 변환된다(Chainlit element ↔ content 매칭 규약). 사용자가 그
-    링크를 클릭해야 비로소 오른쪽 사이드 패널이 열린다.
+    Chainlit 공식 문서에 따르면 display="side"인 엘리먼트는:
+    "The image will not be displayed in the message. Instead, the name
+    of the image will be displayed as clickable link. When the user
+    clicks on the link, the image will be displayed on the side of
+    the message."
 
-    display="inline" 사용 이유 (#111):
-    이전엔 display="side"였는데, side 모드는 메시지가 도착하자마자 사이드
-    패널이 자동으로 열려 답변/출처 영역 공간을 차지했다. inline으로 바꾸면
-    메시지 안에 PDF 뷰어 카드가 인라인으로 렌더되고, 사이드 패널은 사용자가
-    명시적으로 열 때까지 뜨지 않는다. 이로써 "기본은 닫혀 있고, 필요할 때만
-    여는" on-demand UX가 된다.
+    즉 메시지 content의 {filename} 부분이 element name과 매칭되어
+    클릭 가능한 링크로만 보이고, 사용자가 클릭해야 사이드 패널이 열린다.
+    업로드 직후 자동으로 열리지 않는다. (#111)
+
+    (중간에 display="inline"으로 잠시 바꿨던 이유는 과거에 사이드가 자동으로
+    열리는 것처럼 보였기 때문인데, 그건 다른 엘리먼트(cl.Text display="page"
+    등)가 같은 시점에 함께 렌더되면서 발생한 부작용이었다. 현재 코드는
+    display="page"를 쓰지 않으므로 side 원본 동작으로 복귀.)
 
     blob_storage 미설정 환경에서 create_element가 경고만 뿌리고 지나가므로
     시도해볼 가치가 있음. 만약 실제로 블로킹되면 PDF_SEND_TIMEOUT에서 끊긴다.
@@ -212,11 +216,11 @@ async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
         await asyncio.wait_for(
             cl.Message(
                 content=f"📂 원문 보기 — {filename}",
-                elements=[cl.Pdf(name=filename, display="inline", path=str(tmp_path), page=1)],
+                elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)],
             ).send(),
             timeout=PDF_SEND_TIMEOUT,
         )
-        logger.info("PDF 인라인 뷰어 전송 완료: %s", filename)
+        logger.info("PDF 사이드 링크 전송 완료: %s", filename)
     except asyncio.TimeoutError:
         logger.warning("PDF 뷰어 전송 타임아웃 (%ds 초과): %s", PDF_SEND_TIMEOUT, filename)
     except Exception as e:
@@ -422,9 +426,9 @@ async def on_message(message: cl.Message):
         if summary:
             await _render_charts(summary)
 
-        # PDF 원문 — 업로드된 파일 경로를 메시지로 전송해 사용자가 클릭해 볼 수
-        # 있게 한다. _send_pdf_side_panel은 display="inline"이라 메시지 도착 시점에
-        # 사이드 패널을 자동으로 열지 않는다. 답변/출처 영역 공간을 방해하지 않음.
+        # PDF 원문 — display="side"로 파일명 링크만 메시지에 표시.
+        # 사용자가 링크를 클릭하면 비로소 사이드 패널이 열린다 (Chainlit 공식 동작).
+        # 업로드 직후 자동으로 열리지 않으므로 기본 화면은 답변/요약/차트에 집중.
         # 실패/타임아웃 시 graceful skip (PDF_SEND_TIMEOUT=5s).
         # resume 시 복원은 blob_storage 연결(#101) 후에만 가능.
         if tmp_path.suffix.lower() == ".pdf":
