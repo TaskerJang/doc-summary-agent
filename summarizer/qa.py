@@ -51,6 +51,40 @@ _QA_SYSTEM_PROMPT = (
 # ── reranker 싱글턴 ─────────────────────────────────────────────────────────
 _reranker = None
 
+
+def _get_reranker():
+    """
+    bge-reranker-v2-m3 싱글턴 (동기).
+
+    _aget_reranker와 동일한 _reranker 전역 싱글턴을 공유한다. Q&A 경로에서는
+    이벤트 루프 블로킹을 피하기 위해 _aget_reranker(asyncio.to_thread 래핑)를
+    쓰고, 업로드 직후 백그라운드 워밍업에서는 이 동기 버전을 쓴다.
+
+    bge-reranker-v2-m3는 bge-m3와 동일한 sentence-transformers 계열이라
+    CPU 연산으로 GIL을 길게 잡는다. 따라서 이 함수는 반드시 threading.Thread로
+    완전히 분리된 스레드에서만 호출되어야 한다. 이벤트 루프가 돌아가는
+    async 컨텍스트에서 직접 호출하면 UI 스트리밍이 블로킹된다.
+    (선례: summarizer.embedder.index_chunks 동기 함수를 _index_in_background
+     threading.Thread에서 호출)
+
+    미설치 또는 로드 실패 시 None 반환, _reranker는 False sentinel로
+    세팅되어 재시도를 막는다. 워밍업 실패 시에도 sentinel이 세팅되어
+    이후 _aget_reranker 호출 시 재시도하지 않고 reranking을 스킵한다 —
+    이 경우 RRF 결과가 그대로 LLM 컨텍스트로 전달된다.
+    """
+    global _reranker
+    if _reranker is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            logger.info("bge-reranker-v2-m3 로딩 중...")
+            _reranker = CrossEncoder("BAAI/bge-reranker-v2-m3", max_length=512)
+            logger.info("bge-reranker-v2-m3 로딩 완료")
+        except Exception as e:
+            logger.warning("reranker 로드 실패 — reranking 스킵: %s", e)
+            _reranker = False  # 재시도 방지용 sentinel
+    return _reranker if _reranker else None
+
+
 async def _aget_reranker():
     """
     bge-reranker-v2-m3 싱글턴 (async).
@@ -60,6 +94,10 @@ async def _aget_reranker():
     첫 호출 시 CrossEncoder 초기화가 모델 파일 로드(디스크 I/O + CPU)로
     수 초~수십 초 블로킹되므로 asyncio.to_thread로 감싸 이벤트 루프를
     살려둔다. (#107)
+
+    업로드 직후 _warmup_reranker_in_background에서 동기 _get_reranker로
+    이미 싱글턴이 로드되어 있으면 이 함수는 캐시된 _reranker를 즉시 반환.
+    (#109)
     """
     global _reranker
     if _reranker is None:
