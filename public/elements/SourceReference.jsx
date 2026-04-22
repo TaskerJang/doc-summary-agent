@@ -30,7 +30,7 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
-import { Pin } from "lucide-react";
+import { Pin, Maximize2 } from "lucide-react";
 
 /**
  * 청크 본문에 섞여있는 마크다운 artifact 제거.
@@ -146,9 +146,19 @@ function SourceItem({ item }) {
           <HoverCardContent
             side="top"
             align="start"
-            className="w-[420px] max-w-[90vw]"
+            className="w-[420px] max-w-[90vw] p-0 overflow-hidden"
           >
-            <div className="space-y-2">
+            {/*
+             * 헤더: 번호 뱃지 + "미리보기" 라벨
+             * 본문: 섹션명 + 원문 앞 240자 미리보기
+             * 푸터: "원문 전체 보기" CTA 버튼 — 시각적으로 분리하여
+             *       클릭 가능한 요소임을 명확히 한다.
+             *
+             * 이전엔 푸터가 본문 하단 여백에 작은 회색 텍스트로 있어서
+             * 근거 내용 일부처럼 보였다. border-t로 구분선 추가 + primary
+             * 컬러 배경 + 아이콘으로 CTA 버튼 정체성 강화.
+             */}
+            <div className="p-3 space-y-2">
               <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                 <Pin className="h-3 w-3" />
                 <span>근거 {index} · 미리보기</span>
@@ -161,9 +171,17 @@ function SourceItem({ item }) {
               <div className="text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
                 {preview}
               </div>
-              <div className="pt-1 text-[11px] text-muted-foreground/80">
-                클릭하면 원문 전체 보기
-              </div>
+            </div>
+
+            <div
+              className="
+                flex items-center justify-center gap-1.5
+                px-3 py-2 border-t border-border/60
+                bg-primary/5 text-primary text-xs font-medium
+              "
+            >
+              <Maximize2 className="h-3 w-3" />
+              <span>클릭하면 원문 전체 보기</span>
             </div>
           </HoverCardContent>
         </HoverCard>
