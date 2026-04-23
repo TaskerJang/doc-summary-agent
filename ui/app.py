@@ -200,38 +200,39 @@ async def _render_charts(summary: SummaryResult) -> None:
         logger.info("차트 렌더링 완료 — %d개 출력 (size=%s)", rendered, CHART_SIZE)
 
 
-async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
-    """PDF 원문을 사이드 패널 트리거 메시지로 전송.
+async def _send_pdf_viewer(filename: str, tmp_path: Path) -> None:
+    """PDF 원문을 풀페이지 뷰어 트리거 메시지로 전송.
 
-    Chainlit 공식 문서에 따르면 display="side"인 엘리먼트는:
-    "The image will not be displayed in the message. Instead, the name
-    of the image will be displayed as clickable link. When the user
-    clicks on the link, the image will be displayed on the side of
-    the message."
+    왜 display="page"인가 — 버그 조사 결과 (#117):
+    ---------------------------------------------
+    원래 설계는 display="side"로 오른쪽 사이드 패널에 PDF를 띄우는 것이었으나,
+    Chainlit 2.11.0에서 cl.Pdf 뷰어가 iframe → pdfjs-dist 기반으로 통째로
+    교체(Chainlit PR #2833)되면서 display="side"가 링크 클릭 없이 엘리먼트
+    마운트 즉시 사이드 패널을 자동 펼치는 회귀가 발생함.
 
-    즉 메시지 content의 {filename} 부분이 element name과 매칭되어
-    클릭 가능한 링크로만 보이고, 사용자가 클릭해야 사이드 패널이 열린다 —
-    공식 문서 기준으로는. (#111)
+    최소 재현 (repro/repro_pdf_side.py) 결과:
+      - A1 (side, page=None, mention=True):      🔴 자동 열림
+      - A3 (side, page=1,    mention=True):      🔴 자동 열림  ← 기존 프로덕션 설정
+      - B1 (inline, page=None):                  🟢 공식 문서대로 인라인 렌더
+      - C1 (page, page=None):                    🟢 공식 문서대로 링크 → 클릭 → 오버레이
 
-    그러나 실제로는 업로드 직후 자동으로 사이드가 열리는 현상이 재현됨.
-    원인 불명 (Chainlit 버전 특정 동작 추정). 이 함수 자체는 그대로 두고
-    호출 시점을 on_message 업로드 플로우 → open_pdf action_callback으로
-    이동하여 자동 열림을 원천 차단. 사용자가 "📂 원본 PDF 열기" 버튼을
-    눌렀을 때만 이 함수가 호출되므로 버튼 → 링크 → 사이드 흐름으로 제한됨.
+    → display="page"는 정상 동작 확인. 기존 UX (버튼 클릭 → 링크 → 뷰어) 와
+    거의 동일하며 풀페이지 오버레이는 Esc/X로 쉽게 닫을 수 있음.
+    Chainlit 상류가 side 모드 회귀를 고치면 이 함수를 한 줄 되돌리면 된다.
 
-    blob_storage 미설정 환경에서 create_element가 경고만 뿌리고 지나가므로
-    시도해볼 가치가 있음. 만약 실제로 블로킹되면 PDF_SEND_TIMEOUT에서 끊긴다.
-    resume 시 복원은 blob_storage 연결(#101) 후에만 가능.
+    page 파라미터 제거:
+      페이지 1번이 기본값이므로 명시적 page=1은 불필요. 게다가 page 지정이
+      일부 렌더 경로에서 auto-open의 추가 트리거 가능성이 있어 보수적으로 제거.
     """
     try:
         await asyncio.wait_for(
             cl.Message(
                 content=f"📂 원문 보기 — {filename}",
-                elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)],
+                elements=[cl.Pdf(name=filename, display="page", path=str(tmp_path))],
             ).send(),
             timeout=PDF_SEND_TIMEOUT,
         )
-        logger.info("PDF 사이드 링크 전송 완료: %s", filename)
+        logger.info("PDF 뷰어 링크 전송 완료: %s", filename)
     except asyncio.TimeoutError:
         logger.warning("PDF 뷰어 전송 타임아웃 (%ds 초과): %s", PDF_SEND_TIMEOUT, filename)
     except Exception as e:
@@ -306,6 +307,9 @@ async def on_chat_start():
     cl.user_session.set("raw_chunks", [])
     cl.user_session.set("doc_id", None)
     cl.user_session.set("pdf_path", None)
+    # PDF 뷰어 중복 전송 방지 플래그 초기화 (#117).
+    # on_open_pdf에서 True로 세팅되어 버튼 다중 클릭에 대한 방어로 쓰인다.
+    cl.user_session.set("pdf_viewer_sent", False)
     settings = await cl.ChatSettings([
         Switch(id="chart_enabled", label="차트 자동 생성",
                description="문서 분석 후 수치 데이터를 Plotly 차트로 자동 렌더링합니다.", initial=True),
@@ -422,11 +426,14 @@ async def on_message(message: cl.Message):
         cl.user_session.set("raw_chunks", raw_chunks)
         cl.user_session.set("doc_id", doc_id)
         # PDF 경로를 세션에 저장 → 나중에 open_pdf action_callback에서 꺼내 씀.
-        # 업로드 직후 cl.Pdf 엘리먼트를 전송하지 않으므로 자동 사이드 열림 차단.
+        # 업로드 직후 cl.Pdf 엘리먼트를 전송하지 않으므로 자동 펼침 차단 (#117).
         if tmp_path.suffix.lower() == ".pdf":
             cl.user_session.set("pdf_path", str(tmp_path))
         else:
             cl.user_session.set("pdf_path", None)
+        # 새 문서 업로드 시 중복 전송 플래그 리셋 — 같은 세션에서 문서를
+        # 재업로드하는 경우에도 새 PDF를 한 번은 열 수 있어야 하기 때문.
+        cl.user_session.set("pdf_viewer_sent", False)
         summary = _to_summary_result(step3)
 
         # 전체 요약
@@ -444,12 +451,12 @@ async def on_message(message: cl.Message):
         if summary:
             await _render_charts(summary)
 
-        # PDF 원문 — on-demand only (#111)
-        # 이전에는 여기서 _send_pdf_side_panel을 자동 호출했으나, Chainlit이
+        # PDF 원문 — on-demand only (#111, #117)
+        # 이전에는 여기서 _send_pdf_viewer를 자동 호출했으나, Chainlit 2.11.0이
         # cl.Pdf(display="side")를 받으면 링크 클릭 없이도 사이드 패널을 자동
-        # 펼치는 현상이 재현되어 자동 호출을 제거. 대신 추천 질문 메시지 옆에
-        # "📂 원본 PDF 열기" Action 버튼을 추가하여 사용자가 눌렀을 때만
-        # _send_pdf_side_panel이 호출되도록 함 (open_pdf callback 참조).
+        # 펼치는 현상이 재현되어 자동 호출을 제거. #117에서 추가 조사한 결과
+        # display="page"로 전환하여 side 회귀를 우회하고, 버튼 클릭 시점에만
+        # 뷰어를 전송하는 흐름을 유지.
 
         # 추천 질문 버튼 (cl.Action) — SQLAlchemy 환경에서 재시도.
         # PDF인 경우 "📂 원본 PDF 열기" 액션을 뒤에 추가.
@@ -488,14 +495,32 @@ async def on_followup(action: cl.Action):
 
 @cl.action_callback("open_pdf")
 async def on_open_pdf(action: cl.Action):
-    """원본 PDF 열기 버튼 클릭 시 호출 (#111).
+    """원본 PDF 열기 버튼 클릭 시 호출 (#111, #117).
 
-    업로드 시점이 아닌 명시적 사용자 액션 시점에만 cl.Pdf(display="side")를
-    전송하여 Chainlit의 자동 사이드 열림 이슈를 우회. 버튼 클릭 → 링크
-    메시지 전송 → 사용자가 링크 클릭 → 사이드 패널 열림 흐름이 보장됨.
+    명시적 사용자 액션 시점에만 cl.Pdf(display="page") 엘리먼트를 전송한다.
+    display="side"는 Chainlit 2.11.0에서 자동 펼침 회귀가 있어 page 모드로
+    전환함 (repro 결과 및 _send_pdf_viewer docstring 참조).
+
+    중복 전송 방지 (#117의 두 번째 증상):
+    ------------------------------------
+    사용자가 "📂 원본 PDF 열기" 버튼을 빠르게 여러 번 클릭하면 기존 구현은
+    매 클릭마다 새 PDF 뷰어 메시지를 전송하여 같은 메시지가 3번, 4번 쌓이는
+    문제가 있었음. (이슈 #117 스크린샷의 "메시지 중복" 증상)
+
+    세션 플래그 pdf_viewer_sent로 1회 전송 제한:
+      1) 이미 True면 즉시 return (조용히 무시)
+      2) 전송 시도 전에 선점적으로 True 세팅 → 다음 클릭부터 즉시 차단
+      3) 사전 validation 실패(path 없음/미존재) 시 플래그를 False로 롤백하여
+         사용자가 파일 재업로드 후 다시 눌렀을 때 정상 동작 보장
 
     세션에 pdf_path가 없으면 (비-PDF 문서 or 세션 리셋) 안내 메시지만 출력.
     """
+    # Guard 1: 이미 전송한 세션이면 즉시 무시 (다중 클릭 방어)
+    if cl.user_session.get("pdf_viewer_sent"):
+        logger.info("open_pdf 중복 클릭 무시 (doc_id=%s)",
+                    cl.user_session.get("doc_id") or "unknown")
+        return
+
     pdf_path_str = cl.user_session.get("pdf_path")
     doc_id       = cl.user_session.get("doc_id")
 
@@ -509,4 +534,15 @@ async def on_open_pdf(action: cl.Action):
         await cl.Message(content="⚠️ 업로드된 PDF 파일을 찾을 수 없습니다. 파일을 다시 업로드해 주세요.").send()
         return
 
-    await _send_pdf_side_panel(doc_id, pdf_path)
+    # Guard 2: 전송 직전에 플래그 선점 — _send_pdf_viewer 호출이 await인
+    # 동안 사용자가 한 번 더 클릭해도 이 시점에서 차단됨.
+    cl.user_session.set("pdf_viewer_sent", True)
+
+    try:
+        await _send_pdf_viewer(doc_id, pdf_path)
+    except Exception:
+        # 전송 자체가 예외로 실패한 경우에는 플래그를 롤백하여 재시도 가능.
+        # (_send_pdf_viewer 내부에서 TimeoutError/Exception을 잡아 로깅만
+        # 하므로 여기로 예외가 올라오는 경우는 극히 드물지만 안전장치)
+        cl.user_session.set("pdf_viewer_sent", False)
+        raise
