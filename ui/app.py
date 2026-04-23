@@ -1,7 +1,7 @@
 """
 ui/app.py
 Chainlit UI 진입점 — ChatGPT 스타일
-파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → PDF 원문 → 추천 질문 버튼 → Q&A
+파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → 추천 질문 버튼 + PDF 열기 → Q&A
 """
 import asyncio
 import logging
@@ -106,8 +106,8 @@ async def _send_qa_answer(qa_result) -> None:
 
     원래 설계는 cl.Text(display="page") 풀스크린 오버레이였으나
     chainlit/chainlit#1559, #1827 업스트림 버그로 작동 불가.
-    대안으로 마크다운 출처 블록 + 개별 "근거 N" 버튼을 띄우는 방식을 거츼으나
-    (a) 거춣장스러운 버튼 블록, (b) msg.elements 순서 미보장 (chainlit#2202)
+    대안으로 마크다운 출처 블록 + 개별 "근거 N" 버튼을 띄우는 방식을 거쳤으나
+    (a) 거추장스러운 버튼 블록, (b) msg.elements 순서 미보장 (chainlit#2202)
     문제가 있어 최종적으로:
 
       - 마크다운 "📌 출처" 블록 제거
@@ -117,7 +117,7 @@ async def _send_qa_answer(qa_result) -> None:
       - 호버 → HoverCard로 원문 앞부분 미리보기
       - 클릭 → Dialog 모달로 원문 전체 보기
 
-    Perplexity/Granola/Sana 스타일 "claim-to-source" UX에 가깝음.
+    Perplexity/Granola/Sana 스타일 "claim-to-source" UX에 가까움.
     단일 엘리먼트라 Chainlit 내부 순서 미보장 이슈에도 영향받지 않음 —
     React가 items.map()의 렌더링 순서를 보장.
 
@@ -210,13 +210,14 @@ async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
     the message."
 
     즉 메시지 content의 {filename} 부분이 element name과 매칭되어
-    클릭 가능한 링크로만 보이고, 사용자가 클릭해야 사이드 패널이 열린다.
-    업로드 직후 자동으로 열리지 않는다. (#111)
+    클릭 가능한 링크로만 보이고, 사용자가 클릭해야 사이드 패널이 열린다 —
+    공식 문서 기준으로는. (#111)
 
-    (중간에 display="inline"으로 잠시 바꿨던 이유는 과거에 사이드가 자동으로
-    열리는 것처럼 보였기 때문인데, 그건 다른 엘리먼트(cl.Text display="page"
-    등)가 같은 시점에 함께 렌더되면서 발생한 부작용이었다. 현재 코드는
-    display="page"를 쓰지 않으므로 side 원본 동작으로 복귀.)
+    그러나 실제로는 업로드 직후 자동으로 사이드가 열리는 현상이 재현됨.
+    원인 불명 (Chainlit 버전 특정 동작 추정). 이 함수 자체는 그대로 두고
+    호출 시점을 on_message 업로드 플로우 → open_pdf action_callback으로
+    이동하여 자동 열림을 원천 차단. 사용자가 "📂 원본 PDF 열기" 버튼을
+    눌렀을 때만 이 함수가 호출되므로 버튼 → 링크 → 사이드 흐름으로 제한됨.
 
     blob_storage 미설정 환경에서 create_element가 경고만 뿌리고 지나가므로
     시도해볼 가치가 있음. 만약 실제로 블로킹되면 PDF_SEND_TIMEOUT에서 끊긴다.
@@ -304,6 +305,7 @@ async def on_chat_start():
     cl.user_session.set("result", None)
     cl.user_session.set("raw_chunks", [])
     cl.user_session.set("doc_id", None)
+    cl.user_session.set("pdf_path", None)
     settings = await cl.ChatSettings([
         Switch(id="chart_enabled", label="차트 자동 생성",
                description="문서 분석 후 수치 데이터를 Plotly 차트로 자동 렌더링합니다.", initial=True),
@@ -419,6 +421,12 @@ async def on_message(message: cl.Message):
         cl.user_session.set("result", step3)
         cl.user_session.set("raw_chunks", raw_chunks)
         cl.user_session.set("doc_id", doc_id)
+        # PDF 경로를 세션에 저장 → 나중에 open_pdf action_callback에서 꺼내 씀.
+        # 업로드 직후 cl.Pdf 엘리먼트를 전송하지 않으므로 자동 사이드 열림 차단.
+        if tmp_path.suffix.lower() == ".pdf":
+            cl.user_session.set("pdf_path", str(tmp_path))
+        else:
+            cl.user_session.set("pdf_path", None)
         summary = _to_summary_result(step3)
 
         # 전체 요약
@@ -436,16 +444,22 @@ async def on_message(message: cl.Message):
         if summary:
             await _render_charts(summary)
 
-        # PDF 원문 — display="side"로 파일명 링크만 메시지에 표시.
-        # 사용자가 링크를 클릭하면 비로소 사이드 패널이 열린다 (Chainlit 공식 동작).
-        # 업로드 직후 자동으로 열리지 않으므로 기본 화면은 답변/요약/차트에 집중.
-        # 실패/타임아웃 시 graceful skip (PDF_SEND_TIMEOUT=5s).
-        # resume 시 복원은 blob_storage 연결(#101) 후에만 가능.
-        if tmp_path.suffix.lower() == ".pdf":
-            await _send_pdf_side_panel(filename, tmp_path)
+        # PDF 원문 — on-demand only (#111)
+        # 이전에는 여기서 _send_pdf_side_panel을 자동 호출했으나, Chainlit이
+        # cl.Pdf(display="side")를 받으면 링크 클릭 없이도 사이드 패널을 자동
+        # 펼치는 현상이 재현되어 자동 호출을 제거. 대신 추천 질문 메시지 옆에
+        # "📂 원본 PDF 열기" Action 버튼을 추가하여 사용자가 눌렀을 때만
+        # _send_pdf_side_panel이 호출되도록 함 (open_pdf callback 참조).
 
-        # 추천 질문 버튼 (cl.Action) — SQLAlchemy 환경에서 재시도
+        # 추천 질문 버튼 (cl.Action) — SQLAlchemy 환경에서 재시도.
+        # PDF인 경우 "📂 원본 PDF 열기" 액션을 뒤에 추가.
         actions = _build_follow_ups(summary)
+        if tmp_path.suffix.lower() == ".pdf":
+            actions.append(cl.Action(
+                name="open_pdf",
+                payload={},   # 필요한 정보는 세션에서 꺼내므로 payload 불필요
+                label="📂 원본 PDF 열기",
+            ))
         await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
 
         # reranker 사전 워밍업 (fire-and-forget) — 첫 Q&A cold start 제거 (#109)
@@ -470,3 +484,29 @@ async def on_followup(action: cl.Action):
     question = action.payload["value"]
     await cl.Message(content=question, author="user").send()
     await _run_qa(question)
+
+
+@cl.action_callback("open_pdf")
+async def on_open_pdf(action: cl.Action):
+    """원본 PDF 열기 버튼 클릭 시 호출 (#111).
+
+    업로드 시점이 아닌 명시적 사용자 액션 시점에만 cl.Pdf(display="side")를
+    전송하여 Chainlit의 자동 사이드 열림 이슈를 우회. 버튼 클릭 → 링크
+    메시지 전송 → 사용자가 링크 클릭 → 사이드 패널 열림 흐름이 보장됨.
+
+    세션에 pdf_path가 없으면 (비-PDF 문서 or 세션 리셋) 안내 메시지만 출력.
+    """
+    pdf_path_str = cl.user_session.get("pdf_path")
+    doc_id       = cl.user_session.get("doc_id")
+
+    if not pdf_path_str or not doc_id:
+        await cl.Message(content="⚠️ 열 수 있는 PDF 파일이 없습니다.").send()
+        return
+
+    pdf_path = Path(pdf_path_str)
+    if not pdf_path.exists():
+        logger.warning("PDF 파일이 서버에서 사라짐: %s", pdf_path_str)
+        await cl.Message(content="⚠️ 업로드된 PDF 파일을 찾을 수 없습니다. 파일을 다시 업로드해 주세요.").send()
+        return
+
+    await _send_pdf_side_panel(doc_id, pdf_path)
