@@ -1,25 +1,35 @@
 // public/elements/SourceReference.jsx
 //
-// Q&A 답변의 출처 리스트 — 호버 미리보기 + CTA 버튼 클릭으로 전체 원문 모달.
+// Q&A 답변의 출처 리스트 — 호버 미리보기 + 클릭 원문 전체 모달.
 //
-// UX 분리 (#111):
-//   - 근거 텍스트 항목: 호버 시 팝오버 미리보기만 뜸 (클릭해도 아무 일 없음)
-//   - 팝오버 내 "원문 전체 보기" 버튼: 클릭 시 shadcn Dialog 모달 오픈
-//   - ESC/바깥 클릭/X로 모달 닫힘 (Dialog 기본 동작)
+// UX (#111):
+//   - 근거 텍스트 호버: HoverCard로 원문 앞부분 미리보기
+//   - 근거 텍스트 클릭: Dialog 모달로 원문 청크 전체 보기
+//   - 팔월시 ESC/바깥 클릭/X 버튼으로 닫힘 (Dialog 기본)
 //
-// 이전엔 근거 텍스트 버튼 자체가 호버(팝오버)와 클릭(모달)을 모두 받아
-// 텍스트 클릭만 해도 바로 모달이 떴다. 의도와 다르므로 트리거를 분리:
-// HoverCardTrigger는 근거 텍스트에, DialogTrigger는 팝오버 내 CTA 버튼에만.
+// Radix의 HoverCard와 Dialog는 동일 엘리먼트에 asChild로 중첩 마운트가
+// 가능하다. 안쪽 스텍(HoverCardTrigger) → 바깥 스텍(DialogTrigger) 순서로
+// 감싸도 두 Trigger 모두 정상 동작한다. 이전에 안 되던 이유는
+// HoverCardTrigger 안에 Dialog를 넣고 Dialog 안에 또 DialogTrigger를 넣었기
+// 때문이었다. 이번엔 평면화해서 해결.
 //
-// 단일 CustomElement로 전체 items를 map하여 렌더하므로 Chainlit의
+// 레퍼런스
+//   - Shape of AI: "dual mode (hover preview / click full source)"
+//   - Perplexity / Granola / Sana: claim-to-source UX
+//   - thefrontkit: "left border or background shading to distinguish cited material"
+//   - Graphlit: "title, page, relevance, excerpt" citation card metadata
+//
+// 단일 CustomElement로 전체 items를 map하므로 Chainlit의
 // msg.elements 순서 미보장 이슈(chainlit#2202)에 영향받지 않는다.
 //
-// props.items: Array<{
-//   index: int,
-//   section: string,
-//   snippet: string,     // ui/app.py qa_result.sources[i].snippet (요약 섹션 불릿)
-//   fullChunk: string,   // reranker top-3 원문 청크 본문
-// }>
+// props:
+//   items: Array<{
+//     index: int,
+//     section: string,
+//     snippet: string,     // ui/app.py qa_result.sources[i].snippet (요약 섹션 불릿)
+//     fullChunk: string,   // reranker top-3 원문 청크 본문
+//   }>
+//   docId: string          // 현재 세션의 원본 문서 파일명 (모달 헤더 메타데이터용)
 
 import {
   Dialog,
@@ -34,7 +44,7 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
-import { Pin, Maximize2 } from "lucide-react";
+import { Pin, FileText } from "lucide-react";
 
 /**
  * 청크 본문에 섞여있는 마크다운/HTML artifact 제거.
@@ -55,7 +65,7 @@ import { Pin, Maximize2 } from "lucide-react";
 function stripMarkdown(text) {
   if (!text) return "";
   return text
-    // ─── HTML 정제 (마크다운보다 먼저 처리) ──────────────────────────
+    // ─── HTML 정제 (마크다운보다 먼저 처리) ──────────────────
     // <br>, <br/>, <BR/>, <br /> 모두 줄바꿈으로 (대소문자/공백 무관)
     .replace(/<br\s*\/?>/gi, "\n")
     // <p>, </p>도 문단 구분이므로 줄바꿈으로 치환
@@ -72,13 +82,13 @@ function stripMarkdown(text) {
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
-    // ─── 마크다운 정제 ────────────────────────────────────────────
+    // ─── 마크다운 정제 ─────────────────────────────────
     .replace(/^#{1,6}\s+/gm, "")      // ## 헤더 → 평문
     .replace(/\*\*([^*]+)\*\*/g, "$1") // **굵은글씨** → 평문
     .replace(/\*([^*]+)\*/g, "$1")    // *기울임* → 평문
     .replace(/^[-*+]\s+/gm, "• ")     // - 리스트 → • 불릿
     .replace(/`([^`]+)`/g, "$1")      // `코드` → 평문
-    // ─── 공백 정리 ────────────────────────────────────────────────
+    // ─── 공백 정리 ───────────────────────────────────
     .replace(/\n{3,}/g, "\n\n")       // 과한 줄바꿈 정리
     .replace(/[ \t]+/g, " ")          // 연속 공백/탭 1칸으로
     .replace(/[ \t]+\n/g, "\n")       // 줄 끝 공백 제거
@@ -92,7 +102,7 @@ function buildPreview(fullChunk, maxLen = 120) {
   return clean.slice(0, maxLen).trimEnd() + "…";
 }
 
-function SourceItem({ item }) {
+function SourceItem({ item, docId }) {
   const {
     index = 1,
     section = "",
@@ -103,16 +113,15 @@ function SourceItem({ item }) {
   const preview = hasFullChunk ? buildPreview(fullChunk) : "";
   const cleanBody = hasFullChunk ? stripMarkdown(fullChunk) : "";
 
-  // 번호 뱃지 + 섹션명 + snippet 한 줄의 근거 항목.
-  // <button>이 아닌 <div role="presentation">으로 두어 클릭 의도 제거 —
-  // 호버 시에만 팝오버가 뜨고, 모달은 팝오버 내 CTA 버튼을 통해서만 열린다.
+  // 근거 한 줄 — 번호 배지 + 섹션명 + snippet.
+  // 호버(팝오버 미리보기)와 클릭(모달) 둘 다 받는다.
   const rowContent = (
     <div
       className="
         w-full text-left group
         flex items-start gap-2 py-1.5 px-2 -mx-2 rounded-md
         transition-colors hover:bg-muted/60
-        cursor-default
+        cursor-pointer
       "
       aria-label={`근거 ${index}: ${section}`}
     >
@@ -141,34 +150,49 @@ function SourceItem({ item }) {
 
   // full_chunk 없으면 호버/클릭 인터랙션 없이 정보만 표시 (엣지케이스 방어).
   if (!hasFullChunk) {
-    return <li className="list-none">{rowContent}</li>;
+    return (
+      <li className="list-none">
+        <div className="w-full text-left flex items-start gap-2 py-1.5 px-2 -mx-2 rounded-md cursor-default">
+          <span className="shrink-0 inline-flex items-center justify-center w-5 h-5 mt-0.5 rounded bg-primary/10 text-primary text-xs font-medium">
+            {index}
+          </span>
+          <span className="flex-1 min-w-0 text-sm leading-relaxed">
+            <span className="font-medium text-foreground">{section}</span>
+            {snippet && (
+              <>
+                <span className="text-muted-foreground"> — </span>
+                <span className="text-muted-foreground">{snippet}</span>
+              </>
+            )}
+          </span>
+        </div>
+      </li>
+    );
   }
 
-  // Dialog는 최상위에 두고, DialogTrigger는 팝오버 안의 "원문 전체 보기"
-  // 버튼에 둔다. HoverCard는 근거 텍스트 줄에 걸리고, 두 트리거가 분리되어
-  // 의도한 UX:
-  //   근거 텍스트 호버 → 팝오버 표시 (클릭해도 모달 안 뜸)
-  //   팝오버 내 CTA 버튼 클릭 → 모달 표시
+  // HoverCard와 Dialog의 Trigger를 동일 엘리먼트에 중첩 적용.
+  // Radix 문서: "asChild allows you to compose multiple primitives"
+  //   → HoverCardTrigger와 DialogTrigger 둘 다 asChild로, HoverCardTrigger가
+  //     안에 오도록 중첩하면 둘 다 할 일을 한다 (호버는 외부 Dialog에 영향 안 줌).
   return (
     <li className="list-none">
       <Dialog>
         <HoverCard openDelay={250} closeDelay={150}>
-          <HoverCardTrigger asChild>{rowContent}</HoverCardTrigger>
+          <DialogTrigger asChild>
+            <HoverCardTrigger asChild>{rowContent}</HoverCardTrigger>
+          </DialogTrigger>
 
           {/*
-           * 팝오버 크기 최소화:
-           * - 폭 260px, 본문 padding 2.5
-           * - "근거 N · 미리보기" 헤더 줄 제거 (섹션명이 이미 헤더 역할)
-           * - 섹션명 폰트 text-sm → text-xs semibold
-           * - 미리보기 120자로 축소 (작아진 공간에 맞춤)
-           * - CTA 버튼 py-2 → py-1.5, 아이콘 h-3 w-3 유지
+           * 팝오버 — 호버 시 드는 미리보기 (260px, 컬팩트).
+           * "원문 전체 보기" CTA 버튼은 제거됨 — 사용자 피드백: 근거 줄
+           * 자체를 클릭하는 게 더 직관적이라는 판단. 팝오버는 순수 힘트 역할.
            */}
           <HoverCardContent
             side="top"
             align="start"
-            className="w-[260px] max-w-[90vw] p-0 overflow-hidden"
+            className="w-[260px] max-w-[90vw] p-2.5"
           >
-            <div className="p-2.5 space-y-1">
+            <div className="space-y-1">
               {section && (
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
                   <Pin className="h-3 w-3 text-primary shrink-0" />
@@ -178,35 +202,26 @@ function SourceItem({ item }) {
               <div className="text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
                 {preview}
               </div>
+              <div className="text-[10px] text-muted-foreground/70 pt-0.5">
+                클릭으로 원문 전체 보기
+              </div>
             </div>
-
-            {/*
-             * 팝오버 하단 CTA 버튼 — 이것만 DialogTrigger.
-             * border-t + bg-primary/5로 본문과 시각 분리, 클릭 가능성을 명확화.
-             */}
-            <DialogTrigger asChild>
-              <button
-                type="button"
-                className="
-                  w-full flex items-center justify-center gap-1.5
-                  px-3 py-1.5 border-t border-border/60
-                  bg-primary/5 hover:bg-primary/10
-                  text-primary text-xs font-medium
-                  transition-colors
-                  focus-visible:outline-none focus-visible:bg-primary/10
-                "
-              >
-                <Maximize2 className="h-3 w-3" />
-                <span>원문 전체 보기</span>
-              </button>
-            </DialogTrigger>
           </HoverCardContent>
         </HoverCard>
 
+        {/*
+         * 모달 — 클릭 시 드는 원문 청크 전체 (560px, 메타데이터 + 좌측 보더).
+         *
+         * 레퍼런스 적용:
+         *   - max-w-[560px]: 640px에서 줄임 — 사용자 포커스 존중 (Shape of AI)
+         *   - 좌측 border-l-2 border-primary/40: 원문 인용 시각 구분 (thefrontkit)
+         *   - 헤더에 문서명 메타데이터: title 추가 (Graphlit 가이드)
+         *   - prose-sm: 문단 간격과 가독성 개선
+         */}
         <DialogContent
           className="
             fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2
-            w-[90vw] max-w-[640px] max-h-[80vh]
+            w-[90vw] max-w-[560px] max-h-[80vh]
             flex flex-col gap-0
             rounded-lg border bg-background shadow-xl
             p-0
@@ -214,19 +229,35 @@ function SourceItem({ item }) {
         >
           <DialogHeader className="px-6 pt-6 pb-4 border-b">
             <DialogTitle className="flex items-center gap-2 text-base">
-              <Pin className="h-4 w-4 text-primary" />
-              <span>근거 {index}</span>
+              <span
+                className="
+                  inline-flex items-center justify-center
+                  w-6 h-6 rounded
+                  bg-primary/10 text-primary
+                  text-xs font-semibold
+                "
+              >
+                {index}
+              </span>
+              <span className="truncate">{section || `근거 ${index}`}</span>
             </DialogTitle>
-            {section && (
-              <DialogDescription className="text-sm text-muted-foreground mt-1">
-                {section}
+            {docId && (
+              <DialogDescription className="flex items-center gap-1.5 text-xs text-muted-foreground mt-1.5 ml-8">
+                <FileText className="h-3 w-3 shrink-0" />
+                <span className="truncate">{docId}</span>
               </DialogDescription>
             )}
           </DialogHeader>
 
-          <div className="overflow-auto px-6 py-4 flex-1">
-            <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-              {cleanBody || "원문 청크 내용이 없습니다."}
+          <div className="overflow-auto flex-1 px-6 py-4">
+            {/*
+             * 좌측 primary 보더 + pl-4로 "이건 내가 작성한 게 아니라 원본 인용이다"
+             * 를 시각적으로 표시. (thefrontkit: "background shading or left border")
+             */}
+            <div className="border-l-2 border-primary/40 pl-4">
+              <div className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+                {cleanBody || "원문 청크 내용이 없습니다."}
+              </div>
             </div>
           </div>
         </DialogContent>
@@ -236,7 +267,7 @@ function SourceItem({ item }) {
 }
 
 export default function SourceReference() {
-  const { items = [] } = props || {};
+  const { items = [], docId = "" } = props || {};
 
   if (!items.length) return null;
 
@@ -248,7 +279,7 @@ export default function SourceReference() {
       </div>
       <ul className="space-y-0.5">
         {items.map((it) => (
-          <SourceItem key={it.index} item={it} />
+          <SourceItem key={it.index} item={it} docId={docId} />
         ))}
       </ul>
     </div>

@@ -106,20 +106,24 @@ async def _send_qa_answer(qa_result) -> None:
 
     원래 설계는 cl.Text(display="page") 풀스크린 오버레이였으나
     chainlit/chainlit#1559, #1827 업스트림 버그로 작동 불가.
-    대안으로 마크다운 출처 블록 + 개별 "근거 N" 버튼을 띄우는 방식을 거쳤으나
-    (a) 거추장스러운 버튼 블록, (b) msg.elements 순서 미보장 (chainlit#2202)
+    대안으로 마크다운 출처 블록 + 개별 "근거 N" 버튼을 띄우는 방식을 거츼으나
+    (a) 거춣장스러운 버튼 블록, (b) msg.elements 순서 미보장 (chainlit#2202)
     문제가 있어 최종적으로:
 
       - 마크다운 "📌 출처" 블록 제거
       - 개별 "근거 N" 버튼 블록 제거
       - 출처 전체를 단일 CustomElement(SourceReference)에 items 배열로 전달
-      - JSX 내부에서 번호 뱃지 + 섹션명 + snippet을 한 줄 버튼으로 렌더
+      - JSX 내부에서 번호 배지 + 섹션명 + snippet을 한 줄 버튼으로 렌더
       - 호버 → HoverCard로 원문 앞부분 미리보기
       - 클릭 → Dialog 모달로 원문 전체 보기
 
-    Perplexity/Granola/Sana 스타일 "claim-to-source" UX에 가까움.
+    Perplexity/Granola/Sana 스타일 "claim-to-source" UX에 가깝음.
     단일 엘리먼트라 Chainlit 내부 순서 미보장 이슈에도 영향받지 않음 —
     React가 items.map()의 렌더링 순서를 보장.
+
+    props.docId: 세션 중인 원본 문서 파일명 (지금 업로드된 문서).
+    모달 헤더에 메타데이터로 표시 — 레퍼런스 신뢰도 향상.
+    (thefrontkit/Graphlit 가이드: "expandable source cards"에 title, URL, excerpt 메타데이터)
     """
     msg = cl.Message(content="")
     await msg.send()
@@ -150,7 +154,13 @@ async def _send_qa_answer(qa_result) -> None:
                 cl.CustomElement(
                     name="SourceReference",
                     display="inline",
-                    props={"items": items},
+                    props={
+                        "items": items,
+                        # 현재 세션의 원본 문서 파일명 — 모달 헤더 메타데이터로 표시.
+                        # cl.user_session.get("doc_id")는 업로드 시 filename이 들어가지만
+                        # Q&A 세션이 리셋된 경우 None이 될 수 있어 빈 문자열로 fallback.
+                        "docId": cl.user_session.get("doc_id") or "",
+                    },
                 )
             ]
 
