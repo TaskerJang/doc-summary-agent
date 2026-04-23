@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from openai import OpenAI
 from rank_bm25 import BM25Okapi
@@ -25,6 +26,22 @@ RERANK_TOP_N           = 3    # reranker 최종 반환 수
 CHUNK_BM25_MIN_SCORE   = 0.1
 SECTION_BM25_MIN_SCORE = 0.1
 RRF_K                  = 60
+
+# ── #108 Q&A 진행 상태 이벤트 ────────────────────────────────────────────
+#
+# ask()가 외부(UI 레이어)에 단계 진행 신호를 보낼 때 쓰는 이벤트 이름.
+# summarizer 레이어에 Chainlit 의존성이 침투하지 않도록 콜백 방식으로 설계.
+# ui/app.py의 _run_qa에서 각 이벤트를 cl.Step의 시작/종료로 매핑한다.
+#
+# 이벤트 쌍:
+#   search_start  → search_done  : BM25 + Dense + RRF 실행 구간
+#   rerank_start  → rerank_done  : bge-reranker-v2-m3 실행 구간 (병목 구간)
+#   answer_start  → answer_done  : GPT-5.2 답변 생성 구간
+#
+# 각 구간은 예외 발생 가능. UI는 예외 시에도 해당 Step이 FAILED로 표시되도록
+# try/except/finally로 Step 컨텍스트를 관리해야 한다.
+OnStage = Callable[[str], Awaitable[None]]
+
 
 _OCR_NOISE_RE = re.compile(
     r"\[OCR [^\]]*\]"
@@ -112,6 +129,16 @@ async def _aget_reranker():
             logger.warning("reranker 로드 실패 — reranking 스킵: %s", e)
             _reranker = False  # 재시도 방지용 sentinel
     return _reranker if _reranker else None
+
+
+def is_reranker_loaded() -> bool:
+    """UI 레이어가 cold start 여부를 판단할 때 쓰는 조회 함수 (#108).
+
+    _reranker 전역 변수를 직접 import하는 대신 이 함수를 쓰면 레이어
+    분리가 깔끔하다. True면 싱글턴 로드 완료, False면 아직 미로드 또는
+    로드 실패 sentinel 상태.
+    """
+    return bool(_reranker)
 
 
 async def _rerank(question: str, chunks: list[str], top_n: int = RERANK_TOP_N) -> list[str]:
@@ -222,20 +249,17 @@ def _rrf_fusion(
     return ranked[:top_n]
 
 
-async def _find_relevant_chunks_hybrid(
+async def _rrf_search(
     question: str,
     raw_chunks: list[str],
     doc_id: str | None = None,
 ) -> list[str]:
-    """
-    하이브리드 검색 파이프라인:
-      1) BM25 sparse 검색        → Top-5 청크
-      2) Dense 검색 (Qdrant)     → Top-5 청크
-      3) RRF 퓨전                → Top-5 청크
-      4) bge-reranker-v2-m3     → Top-3 청크 (최종 LLM 컨텍스트)
+    """BM25 + Dense(Qdrant) + RRF 퓨전 (#108에서 분리).
 
-    doc_id 없거나 Qdrant 미연결 시 BM25 → reranker fallback.
-    reranker 미설치 시 RRF 결과 그대로 반환.
+    기존 _find_relevant_chunks_hybrid에서 reranker 앞 단계만 떼어낸 함수.
+    ask()가 search와 rerank 사이에 Step 경계를 넣을 수 있도록 분리했다.
+
+    doc_id 없거나 Qdrant 미연결 시 BM25 결과만 리턴.
     """
     bm25_chunks = _find_relevant_chunks_bm25(question, raw_chunks)
 
@@ -251,11 +275,9 @@ async def _find_relevant_chunks_hybrid(
         fused = _rrf_fusion(bm25_chunks, dense_chunks)
         logger.info("RRF 퓨전 완료 — bm25:%d dense:%d → fused:%d",
                     len(bm25_chunks), len(dense_chunks), len(fused))
-    else:
-        fused = bm25_chunks
+        return fused
 
-    # reranker로 최종 정밀도 향상
-    return await _rerank(question, fused, top_n=RERANK_TOP_N)
+    return bm25_chunks
 
 
 def _find_relevant_sections_bm25(question: str, summary: SummaryResult) -> list:
@@ -347,12 +369,27 @@ def _make_sources(
     return result
 
 
+async def _emit(on_stage: OnStage | None, event: str) -> None:
+    """콜백 안전 호출 (#108).
+
+    on_stage가 None이면 no-op. 콜백 자체가 예외를 던져도 Q&A 본체가
+    깨지지 않도록 격리 — UI Step 관리 실패가 Q&A 결과에 영향을 주면 안 된다.
+    """
+    if on_stage is None:
+        return
+    try:
+        await on_stage(event)
+    except Exception as e:
+        logger.warning("on_stage 콜백 실패 (event=%s): %s", event, e)
+
+
 async def ask(
     question: str,
     summary: SummaryResult,
     raw_chunks: list[str] | None = None,
     pinned_section_indices: list[int] | None = None,
     doc_id: str | None = None,
+    on_stage: OnStage | None = None,
 ) -> QAResult:
     """
     Q&A 메인 함수 (async).
@@ -360,6 +397,10 @@ async def ask(
     _call_api가 async def이므로 ask()도 async로 전환. (#68 AsyncOpenAI 이관 후속)
     검색 파이프라인: BM25 + Dense(Qdrant) → RRF → bge-reranker-v2-m3 → LLM
     doc_id 없으면 BM25 단독 (하위 호환).
+
+    #108: on_stage 콜백으로 UI 레이어에 단계 진행 신호 발행. 이벤트 쌍은
+    (search_start/done), (rerank_start/done), (answer_start/done) 세 구간.
+    콜백이 None이면 모든 발행은 no-op이라 기존 호출자는 그대로 동작한다.
     """
     logger.info("Q&A 시작 — 질문: %r (doc_id=%s)", question[:50], doc_id)
 
@@ -372,7 +413,21 @@ async def ask(
     else:
         relevant_sections = _find_relevant_sections_bm25(question, summary)
 
-    relevant_chunks = await _find_relevant_chunks_hybrid(question, raw_chunks or [], doc_id=doc_id)
+    # ── 검색 단계 (BM25 + Dense + RRF) ──────────────────────────────
+    await _emit(on_stage, "search_start")
+    try:
+        rrf_chunks = await _rrf_search(question, raw_chunks or [], doc_id=doc_id)
+    finally:
+        await _emit(on_stage, "search_done")
+
+    # ── 재정렬 단계 (bge-reranker-v2-m3) ────────────────────────────
+    # reranker가 병목 구간 — cold start 시 최대 2분. UI에서 이 구간을
+    # 가장 두드러지게 표시해야 "응답 없음" 체감이 사라진다.
+    await _emit(on_stage, "rerank_start")
+    try:
+        relevant_chunks = await _rerank(question, rrf_chunks, top_n=RERANK_TOP_N)
+    finally:
+        await _emit(on_stage, "rerank_done")
 
     template = QA_PROMPT_PATH.read_text(encoding="utf-8")
 
@@ -380,7 +435,13 @@ async def ask(
         if relevant_sections or relevant_chunks:
             context     = _build_context(relevant_sections, relevant_chunks)
             user_prompt = template.format(question=question, context=context)
-            raw = await _call_qa(user_prompt)
+
+            # ── 답변 생성 단계 (GPT-5.2) ────────────────────────
+            await _emit(on_stage, "answer_start")
+            try:
+                raw = await _call_qa(user_prompt)
+            finally:
+                await _emit(on_stage, "answer_done")
 
             if not _is_unanswerable(raw):
                 sources = _make_sources(raw, relevant_sections, relevant_chunks)
@@ -396,7 +457,16 @@ async def ask(
         logger.info("overall fallback 사용")
         context     = _build_context([], [], overall=summary.overall, force_overall=True)
         user_prompt = template.format(question=question, context=context)
-        raw = await _call_qa(user_prompt)
+
+        # overall fallback도 LLM 호출이므로 answer Step 대상.
+        # 첫 번째 _call_qa가 돌았는데 unanswerable이었던 경우 여기까지 왔으면
+        # answer_start/done은 이미 한 번 발행됐을 수 있다. fallback 호출도
+        # 동일 이벤트로 감싸서 사용자에게 "답변 재생성 중"임을 표시한다.
+        await _emit(on_stage, "answer_start")
+        try:
+            raw = await _call_qa(user_prompt)
+        finally:
+            await _emit(on_stage, "answer_done")
 
         if _is_unanswerable(raw):
             return QAResult(answer=raw, sources=[], is_answerable=False)
