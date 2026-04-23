@@ -203,34 +203,37 @@ async def _render_charts(summary: SummaryResult) -> None:
 async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
     """PDF 원문을 사이드 패널 트리거 메시지로 전송.
 
-    [C1 조사: #117] page=1 파라미터 제거 테스트.
+    [C2 조사: #117] content에서 파일명(element name) 제거 테스트.
 
-    가설: cl.Pdf의 page 파라미터가 "특정 페이지를 미리 렌더링"하는 역할을 하면서
-    사이드 패널을 자동으로 트리거할 가능성. page 파라미터를 제거하면 엘리먼트가
-    순수 링크 상태로 남아 자동 열림이 사라지는지 확인한다.
+    C1 결과: page=1 제거해도 "📂 원본 PDF 열기" 버튼 클릭 즉시 사이드가 자동으로
+    펼쳐짐. → page 파라미터는 원인이 아님.
+
+    C2 가설: Chainlit 공식 문서는 "element name을 content에 포함시키면 해당 텍스트가
+    클릭 가능한 링크로 치환되어 사용자가 클릭 시 사이드가 열린다"고 설명한다. 그렇다면
+    content에 {filename}이 없으면 → 링크 자체가 렌더되지 않음 → 링크 클릭 이벤트 없음 →
+    사이드가 열릴 트리거가 없어야 함. 이 상태에서도 사이드가 자동으로 열린다면:
+    "엘리먼트가 DOM에 마운트되는 것만으로도 사이드가 열린다"는 가설이 확정됨.
 
     기존:
-        cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)
+        content=f"📂 원문 보기 — {filename}"
+        → Chainlit이 "filename"을 element name과 매칭해 링크로 치환
     변경:
-        cl.Pdf(name=filename, display="side", path=str(tmp_path))
+        content="📂 PDF를 준비했습니다."
+        → 파일명 언급 없음. 링크 자리 없음. 엘리먼트는 여전히 메시지에 부착됨.
 
-    검증 방법:
-      1) PDF 업로드
-      2) 추천 질문 메시지에서 "📂 원본 PDF 열기" 버튼 클릭
-      3) 링크 메시지가 뜬 직후 사이드 패널이 자동으로 펼쳐지는지 확인
-         - 자동 열림 O → page 파라미터는 원인 아님 → C2로 진행
-         - 자동 열림 X → page 파라미터가 원인 확정
-
-    공식 문서 기준 기대 동작:
-    "The image will not be displayed in the message. Instead, the name
-    of the image will be displayed as clickable link. When the user
-    clicks on the link, the image will be displayed on the side of
-    the message."
+    검증:
+      1) PDF 업로드 → "📂 원본 PDF 열기" 버튼 클릭
+      2) 사이드 자동 펼침 여부 관찰
+         - 자동 열림 O → 엘리먼트 마운트만으로 열리는 업스트림 버그 확정 → C3 진행
+         - 자동 열림 X → content의 파일명 매칭이 원인 → 대안: content에서 파일명 제거만으로 해결
+      3) 메시지 UI에서 클릭 가능한 링크(파란색 텍스트)가 보이지 않는지도 확인
+         → 보이지 않아야 정상 (content에서 제거했으므로)
     """
     try:
         await asyncio.wait_for(
             cl.Message(
-                content=f"📂 원문 보기 — {filename}",
+                # [C2] 파일명 제거 — "filename" 자리 링크 렌더링 차단
+                content="📂 PDF를 준비했습니다.",
                 elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path))],
             ).send(),
             timeout=PDF_SEND_TIMEOUT,
