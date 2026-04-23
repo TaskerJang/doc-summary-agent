@@ -5,11 +5,14 @@
 // UX (#111):
 //   - 근거 텍스트 호버: HoverCard로 원문 앞부분 미리보기
 //   - 근거 텍스트 클릭: Dialog 모달로 원문 청크 전체 보기
+//   - 팝오버 하단 "원문 전체 보기" CTA 버튼 클릭: 동일 Dialog 모달 열림
+//     (근거 줄 클릭과 동일한 효과 — 중복 트리거지만 시각적 어포던스 제공)
 //   - ESC/바깥 클릭/X 버튼으로 닫힘 (Dialog 기본)
 //
 // Radix의 HoverCard와 Dialog는 동일 엘리먼트에 asChild로 중첩 마운트가
 // 가능하다. 안쪽 스택(HoverCardTrigger) → 바깥 스택(DialogTrigger) 순서로
-// 감싸도 두 Trigger 모두 정상 동작한다.
+// 감싸도 두 Trigger 모두 정상 동작한다. 또한 같은 Dialog에 여러 DialogTrigger를
+// 마운트해도 문제없으므로 근거 줄과 팝오버 버튼 둘 다 트리거로 쓴다.
 //
 // 레퍼런스
 //   - Shape of AI: "dual mode (hover preview / click full source)"
@@ -42,7 +45,7 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
-import { Pin, FileText } from "lucide-react";
+import { Pin, FileText, Maximize2 } from "lucide-react";
 
 /**
  * 청크 본문에 섞여있는 마크다운/HTML artifact 제거.
@@ -55,7 +58,7 @@ import { Pin, FileText } from "lucide-react";
  *
  * React는 문자열로 들어온 "<br>"를 자동으로 줄바꿈으로 해석하지 않고 그대로
  * 출력하므로, 여기서 선제적으로 평문으로 변환. 표/리스트의 구조 손실은 감수 —
- * 구조까지 확인하려면 사용자가 "📂 원문 보기" 링크로 원본 PDF를 열면 된다.
+ * 구조까지 확인하려면 사용자가 "📂 원본 PDF 열기" 버튼으로 원본 PDF를 열면 된다.
  *
  * 청크에 HTML 태그가 남는 건 파서 측 이슈로, 별도 개선 대상이지만 현재는
  * 표시 단계에서 안전하게 방어.
@@ -168,10 +171,10 @@ function SourceItem({ item, docId }) {
     );
   }
 
-  // HoverCard와 Dialog의 Trigger를 동일 엘리먼트에 중첩 적용.
-  // Radix 문서: "asChild allows you to compose multiple primitives"
-  //   → HoverCardTrigger와 DialogTrigger 둘 다 asChild로, HoverCardTrigger가
-  //     안에 오도록 중첩하면 둘 다 할 일을 한다 (호버는 외부 Dialog에 영향 안 줌).
+  // Dialog를 최상위로 두고 트리거를 두 군데 배치:
+  //   1) 근거 줄 (HoverCardTrigger + DialogTrigger 중첩 asChild)
+  //   2) 팝오버 내 CTA 버튼 (DialogTrigger asChild)
+  // 같은 Dialog에 여러 DialogTrigger를 붙이는 건 Radix에서 지원되는 패턴.
   return (
     <li className="list-none">
       <Dialog>
@@ -182,15 +185,20 @@ function SourceItem({ item, docId }) {
 
           {/*
            * 팝오버 — 호버 시 드는 미리보기 (260px, 컴팩트).
-           * "원문 전체 보기" CTA 버튼은 제거됨 — 사용자 피드백: 근거 줄
-           * 자체를 클릭하는 게 더 직관적이라는 판단. 팝오버는 순수 힌트 역할.
+           * 하단에 "원문 전체 보기" CTA 버튼을 둠 (사용자 요청: 힌트 텍스트 대신
+           * 이전처럼 예쁜 버튼). 근거 줄 클릭으로도 모달이 열리고, 이 버튼
+           * 클릭으로도 동일한 모달이 열리는 이중 트리거 구조.
+           *
+           * 레이아웃 분리:
+           *   - 상단: 섹션명 + 미리보기 (p-2.5)
+           *   - 하단: border-t + bg-primary/5 CTA 버튼 (시각적 구분)
            */}
           <HoverCardContent
             side="top"
             align="start"
-            className="w-[260px] max-w-[90vw] p-2.5"
+            className="w-[260px] max-w-[90vw] p-0 overflow-hidden"
           >
-            <div className="space-y-1">
+            <div className="p-2.5 space-y-1">
               {section && (
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
                   <Pin className="h-3 w-3 text-primary shrink-0" />
@@ -200,10 +208,24 @@ function SourceItem({ item, docId }) {
               <div className="text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
                 {preview}
               </div>
-              <div className="text-[10px] text-muted-foreground/70 pt-0.5">
-                클릭으로 원문 전체 보기
-              </div>
             </div>
+
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="
+                  w-full flex items-center justify-center gap-1.5
+                  px-3 py-1.5 border-t border-border/60
+                  bg-primary/5 hover:bg-primary/10
+                  text-primary text-xs font-medium
+                  transition-colors
+                  focus-visible:outline-none focus-visible:bg-primary/10
+                "
+              >
+                <Maximize2 className="h-3 w-3" />
+                <span>원문 전체 보기</span>
+              </button>
+            </DialogTrigger>
           </HoverCardContent>
         </HoverCard>
 
@@ -234,13 +256,6 @@ function SourceItem({ item, docId }) {
           "
         >
           <DialogHeader className="px-6 pt-5 pb-4 border-b">
-            {/*
-             * 헤더를 한 줄로 통합: 파일명(메인) · 근거 N(보조).
-             * docId가 없으면 fallback으로 "근거 N"만 표시.
-             * DialogTitle은 스크린리더/a11y를 위해 반드시 있어야 하므로
-             * 유지하되, 기존의 큰 제목 느낌(text-base) 대신 한 줄 메타데이터
-             * 스타일(text-sm + muted 결합)로 바꿈.
-             */}
             <DialogTitle className="flex items-center gap-2 text-sm font-medium text-foreground">
               {docId ? (
                 <>
