@@ -85,8 +85,8 @@ function stripMarkdown(text) {
     .trim();
 }
 
-/** 호버 팝오버용 짧은 미리보기 (앞 180자, 공백 정리) */
-function buildPreview(fullChunk, maxLen = 180) {
+/** 호버 팝오버용 짧은 미리보기 (앞 120자, 공백 정리) */
+function buildPreview(fullChunk, maxLen = 120) {
   const clean = stripMarkdown(fullChunk).replace(/\s+/g, " ");
   if (clean.length <= maxLen) return clean;
   return clean.slice(0, maxLen).trimEnd() + "…";
@@ -155,22 +155,27 @@ function SourceItem({ item }) {
         <HoverCard openDelay={250} closeDelay={150}>
           <HoverCardTrigger asChild>{rowContent}</HoverCardTrigger>
 
+          {/*
+           * 팝오버 크기 최소화:
+           * - 폭 260px, 본문 padding 2.5
+           * - "근거 N · 미리보기" 헤더 줄 제거 (섹션명이 이미 헤더 역할)
+           * - 섹션명 폰트 text-sm → text-xs semibold
+           * - 미리보기 120자로 축소 (작아진 공간에 맞춤)
+           * - CTA 버튼 py-2 → py-1.5, 아이콘 h-3 w-3 유지
+           */}
           <HoverCardContent
             side="top"
             align="start"
-            className="w-[320px] max-w-[90vw] p-0 overflow-hidden"
+            className="w-[260px] max-w-[90vw] p-0 overflow-hidden"
           >
-            <div className="p-3 space-y-1.5">
-              <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-                <Pin className="h-3 w-3" />
-                <span>근거 {index} · 미리보기</span>
-              </div>
+            <div className="p-2.5 space-y-1">
               {section && (
-                <div className="text-sm font-medium text-foreground">
-                  {section}
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                  <Pin className="h-3 w-3 text-primary shrink-0" />
+                  <span className="truncate">{section}</span>
                 </div>
               )}
-              <div className="text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap">
+              <div className="text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
                 {preview}
               </div>
             </div>
@@ -184,7 +189,7 @@ function SourceItem({ item }) {
                 type="button"
                 className="
                   w-full flex items-center justify-center gap-1.5
-                  px-3 py-2 border-t border-border/60
+                  px-3 py-1.5 border-t border-border/60
                   bg-primary/5 hover:bg-primary/10
                   text-primary text-xs font-medium
                   transition-colors
