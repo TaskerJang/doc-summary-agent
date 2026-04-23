@@ -203,31 +203,35 @@ async def _render_charts(summary: SummaryResult) -> None:
 async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
     """PDF 원문을 사이드 패널 트리거 메시지로 전송.
 
-    Chainlit 공식 문서에 따르면 display="side"인 엘리먼트는:
+    [C1 조사: #117] page=1 파라미터 제거 테스트.
+
+    가설: cl.Pdf의 page 파라미터가 "특정 페이지를 미리 렌더링"하는 역할을 하면서
+    사이드 패널을 자동으로 트리거할 가능성. page 파라미터를 제거하면 엘리먼트가
+    순수 링크 상태로 남아 자동 열림이 사라지는지 확인한다.
+
+    기존:
+        cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)
+    변경:
+        cl.Pdf(name=filename, display="side", path=str(tmp_path))
+
+    검증 방법:
+      1) PDF 업로드
+      2) 추천 질문 메시지에서 "📂 원본 PDF 열기" 버튼 클릭
+      3) 링크 메시지가 뜬 직후 사이드 패널이 자동으로 펼쳐지는지 확인
+         - 자동 열림 O → page 파라미터는 원인 아님 → C2로 진행
+         - 자동 열림 X → page 파라미터가 원인 확정
+
+    공식 문서 기준 기대 동작:
     "The image will not be displayed in the message. Instead, the name
     of the image will be displayed as clickable link. When the user
     clicks on the link, the image will be displayed on the side of
     the message."
-
-    즉 메시지 content의 {filename} 부분이 element name과 매칭되어
-    클릭 가능한 링크로만 보이고, 사용자가 클릭해야 사이드 패널이 열린다 —
-    공식 문서 기준으로는. (#111)
-
-    그러나 실제로는 업로드 직후 자동으로 사이드가 열리는 현상이 재현됨.
-    원인 불명 (Chainlit 버전 특정 동작 추정). 이 함수 자체는 그대로 두고
-    호출 시점을 on_message 업로드 플로우 → open_pdf action_callback으로
-    이동하여 자동 열림을 원천 차단. 사용자가 "📂 원본 PDF 열기" 버튼을
-    눌렀을 때만 이 함수가 호출되므로 버튼 → 링크 → 사이드 흐름으로 제한됨.
-
-    blob_storage 미설정 환경에서 create_element가 경고만 뿌리고 지나가므로
-    시도해볼 가치가 있음. 만약 실제로 블로킹되면 PDF_SEND_TIMEOUT에서 끊긴다.
-    resume 시 복원은 blob_storage 연결(#101) 후에만 가능.
     """
     try:
         await asyncio.wait_for(
             cl.Message(
                 content=f"📂 원문 보기 — {filename}",
-                elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)],
+                elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path))],
             ).send(),
             timeout=PDF_SEND_TIMEOUT,
         )
