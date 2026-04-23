@@ -5,19 +5,18 @@
 // UX (#111):
 //   - 근거 텍스트 호버: HoverCard로 원문 앞부분 미리보기
 //   - 근거 텍스트 클릭: Dialog 모달로 원문 청크 전체 보기
-//   - 팔월시 ESC/바깥 클릭/X 버튼으로 닫힘 (Dialog 기본)
+//   - ESC/바깥 클릭/X 버튼으로 닫힘 (Dialog 기본)
 //
 // Radix의 HoverCard와 Dialog는 동일 엘리먼트에 asChild로 중첩 마운트가
-// 가능하다. 안쪽 스텍(HoverCardTrigger) → 바깥 스텍(DialogTrigger) 순서로
-// 감싸도 두 Trigger 모두 정상 동작한다. 이전에 안 되던 이유는
-// HoverCardTrigger 안에 Dialog를 넣고 Dialog 안에 또 DialogTrigger를 넣었기
-// 때문이었다. 이번엔 평면화해서 해결.
+// 가능하다. 안쪽 스택(HoverCardTrigger) → 바깥 스택(DialogTrigger) 순서로
+// 감싸도 두 Trigger 모두 정상 동작한다.
 //
 // 레퍼런스
 //   - Shape of AI: "dual mode (hover preview / click full source)"
 //   - Perplexity / Granola / Sana: claim-to-source UX
 //   - thefrontkit: "left border or background shading to distinguish cited material"
 //   - Graphlit: "title, page, relevance, excerpt" citation card metadata
+//   - thefrontkit: "Keep labels short and consistent. Too much detail can overwhelm."
 //
 // 단일 CustomElement로 전체 items를 map하므로 Chainlit의
 // msg.elements 순서 미보장 이슈(chainlit#2202)에 영향받지 않는다.
@@ -36,7 +35,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
@@ -183,9 +181,9 @@ function SourceItem({ item, docId }) {
           </DialogTrigger>
 
           {/*
-           * 팝오버 — 호버 시 드는 미리보기 (260px, 컬팩트).
+           * 팝오버 — 호버 시 드는 미리보기 (260px, 컴팩트).
            * "원문 전체 보기" CTA 버튼은 제거됨 — 사용자 피드백: 근거 줄
-           * 자체를 클릭하는 게 더 직관적이라는 판단. 팝오버는 순수 힘트 역할.
+           * 자체를 클릭하는 게 더 직관적이라는 판단. 팝오버는 순수 힌트 역할.
            */}
           <HoverCardContent
             side="top"
@@ -210,13 +208,21 @@ function SourceItem({ item, docId }) {
         </HoverCard>
 
         {/*
-         * 모달 — 클릭 시 드는 원문 청크 전체 (560px, 메타데이터 + 좌측 보더).
+         * 모달 — 클릭 시 드는 원문 청크 전체.
          *
-         * 레퍼런스 적용:
+         * 헤더 정보 최소화 (레퍼런스 원칙):
+         *   - Perplexity/NotebookLM: 헤더는 "어디서 왔는지"만 표시 (파일명)
+         *   - thefrontkit: "Keep labels short. Too much detail can overwhelm."
+         *   - 섹션명은 본문 첫 줄에 종종 중복되므로 헤더에서 제거
+         *     (호버 팝오버와 메시지 출처 리스트에 이미 섹션명 표시됨)
+         *   - 헤더: 파일 아이콘 + 파일명 · 근거 N (한 줄로 컴팩트)
+         *
+         * 본문 영역:
+         *   - 좌측 border-l-2 border-primary/40 + pl-4로 원문 인용임을 시각화
+         *     (thefrontkit: "background shading or left border")
+         *
+         * 크기:
          *   - max-w-[560px]: 640px에서 줄임 — 사용자 포커스 존중 (Shape of AI)
-         *   - 좌측 border-l-2 border-primary/40: 원문 인용 시각 구분 (thefrontkit)
-         *   - 헤더에 문서명 메타데이터: title 추가 (Graphlit 가이드)
-         *   - prose-sm: 문단 간격과 가독성 개선
          */}
         <DialogContent
           className="
@@ -227,26 +233,30 @@ function SourceItem({ item, docId }) {
             p-0
           "
         >
-          <DialogHeader className="px-6 pt-6 pb-4 border-b">
-            <DialogTitle className="flex items-center gap-2 text-base">
-              <span
-                className="
-                  inline-flex items-center justify-center
-                  w-6 h-6 rounded
-                  bg-primary/10 text-primary
-                  text-xs font-semibold
-                "
-              >
-                {index}
-              </span>
-              <span className="truncate">{section || `근거 ${index}`}</span>
+          <DialogHeader className="px-6 pt-5 pb-4 border-b">
+            {/*
+             * 헤더를 한 줄로 통합: 파일명(메인) · 근거 N(보조).
+             * docId가 없으면 fallback으로 "근거 N"만 표시.
+             * DialogTitle은 스크린리더/a11y를 위해 반드시 있어야 하므로
+             * 유지하되, 기존의 큰 제목 느낌(text-base) 대신 한 줄 메타데이터
+             * 스타일(text-sm + muted 결합)로 바꿈.
+             */}
+            <DialogTitle className="flex items-center gap-2 text-sm font-medium text-foreground">
+              {docId ? (
+                <>
+                  <FileText className="h-4 w-4 text-primary shrink-0" />
+                  <span className="truncate flex-1 min-w-0">{docId}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground font-normal">
+                    · 근거 {index}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Pin className="h-4 w-4 text-primary shrink-0" />
+                  <span>근거 {index}</span>
+                </>
+              )}
             </DialogTitle>
-            {docId && (
-              <DialogDescription className="flex items-center gap-1.5 text-xs text-muted-foreground mt-1.5 ml-8">
-                <FileText className="h-3 w-3 shrink-0" />
-                <span className="truncate">{docId}</span>
-              </DialogDescription>
-            )}
           </DialogHeader>
 
           <div className="overflow-auto flex-1 px-6 py-4">
