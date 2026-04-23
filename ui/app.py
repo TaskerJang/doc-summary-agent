@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 import chainlit as cl
@@ -14,7 +15,7 @@ from chainlit.input_widget import Slider, Switch
 
 from main import run_step1, run_step2, run_step3
 from summarizer.llm import SummaryResult, SectionSummary
-from summarizer.qa import ask, generate_follow_ups
+from summarizer.qa import ask, generate_follow_ups, is_reranker_loaded
 from summarizer.chart_router import route as chart_route
 
 logger = logging.getLogger(__name__)
@@ -103,27 +104,6 @@ async def _send_qa_answer(qa_result) -> None:
     흐름:
       1) 답변 본문 스트리밍
       2) 출처 + 원문 근거 — SourceReference 커스텀 엘리먼트 하나에 통합 (#111)
-
-    원래 설계는 cl.Text(display="page") 풀스크린 오버레이였으나
-    chainlit/chainlit#1559, #1827 업스트림 버그로 작동 불가.
-    대안으로 마크다운 출처 블록 + 개별 "근거 N" 버튼을 띄우는 방식을 거쳤으나
-    (a) 거추장스러운 버튼 블록, (b) msg.elements 순서 미보장 (chainlit#2202)
-    문제가 있어 최종적으로:
-
-      - 마크다운 "📌 출처" 블록 제거
-      - 개별 "근거 N" 버튼 블록 제거
-      - 출처 전체를 단일 CustomElement(SourceReference)에 items 배열로 전달
-      - JSX 내부에서 번호 배지 + 섹션명 + snippet을 한 줄 버튼으로 렌더
-      - 호버 → HoverCard로 원문 앞부분 미리보기
-      - 클릭 → Dialog 모달로 원문 전체 보기
-
-    Perplexity/Granola/Sana 스타일 "claim-to-source" UX에 가까움.
-    단일 엘리먼트라 Chainlit 내부 순서 미보장 이슈에도 영향받지 않음 —
-    React가 items.map()의 렌더링 순서를 보장.
-
-    props.docId: 세션 중인 원본 문서 파일명 (지금 업로드된 문서).
-    모달 헤더에 메타데이터로 표시 — 레퍼런스 신뢰도 향상.
-    (thefrontkit/Graphlit 가이드: "expandable source cards"에 title, URL, excerpt 메타데이터)
     """
     msg = cl.Message(content="")
     await msg.send()
@@ -137,9 +117,6 @@ async def _send_qa_answer(qa_result) -> None:
     await _stream_by_lines(msg, answer)
 
     if qa_result.sources:
-        # 출처/근거 items 빌드 — 섹션명, snippet, 원문 청크 전부 JSX에 위임.
-        # full_chunk가 비어있어도 JSX가 호버/클릭 없이 정보만 렌더하는
-        # fallback을 가지고 있어 여기서 필터링하지 않는다.
         items = []
         for i, s in enumerate(qa_result.sources):
             items.append({
@@ -156,9 +133,6 @@ async def _send_qa_answer(qa_result) -> None:
                     display="inline",
                     props={
                         "items": items,
-                        # 현재 세션의 원본 문서 파일명 — 모달 헤더 메타데이터로 표시.
-                        # cl.user_session.get("doc_id")는 업로드 시 filename이 들어가지만
-                        # Q&A 세션이 리셋된 경우 None이 될 수 있어 빈 문자열로 fallback.
                         "docId": cl.user_session.get("doc_id") or "",
                     },
                 )
@@ -203,29 +177,9 @@ async def _render_charts(summary: SummaryResult) -> None:
 async def _open_pdf_in_sidebar(filename: str, tmp_path: Path) -> None:
     """PDF를 사이드바에 직접 푸시 (#117 C3).
 
-    [배경] C1~C2 조사로 cl.Pdf(display="side")는 엘리먼트 마운트 즉시 사이드를
-    자동으로 펼치는 업스트림 버그가 확정됨 (Chainlit 2.11.0). content에서
-    파일명을 제거해 링크 렌더를 차단해도 사이드가 여전히 열리므로
-    "엘리먼트 존재 자체"가 트리거임이 드러남. display="side" 경로는 포기.
-
-    [대안] 공식 ElementSidebar API는 메시지에 엘리먼트를 붙이지 않고 사이드바에
-    직접 set_elements/set_title을 호출하는 저수준 경로로, display="side"의
-    자동 링크 치환 로직을 완전히 우회한다. 버그 경로를 아예 안 탄다.
-
-    https://docs.chainlit.io/concepts/element (Element Sidebar 섹션):
-        "Setting elements will open the sidebar ...
-         Setting the elements to an empty array will close the sidebar"
-
-    [효과]
-      - 자동 열림 버그 해소: cl.Pdf에 display="side" 파라미터 자체를 안 씀
-      - 링크 메시지 제거: cl.Message(...) 호출이 사라져 "📂 원문 보기 —" 메시지가
-        chat 히스토리에 남지 않음 → 이슈에 보고된 "메시지 3번 중복" 현상도 자연 소멸
-      - 토글 가능: 같은 버튼으로 열고 닫기 (set_elements([])로 close)
-
-    [제약]
-      - ElementSidebar 엘리먼트는 persist되지 않음 (공식 문서 명시).
-        세션 resume 시에는 사이드가 비어있는 상태로 시작하며 사용자가 버튼을
-        다시 눌러야 한다. 현재 UX로는 수용 가능.
+    cl.Pdf(display="side") 자동 열림 업스트림 버그를 우회하기 위해 공식
+    ElementSidebar API를 사용. display="side" 경로를 안 타므로 버그 회피 +
+    chat 히스토리에 링크 메시지도 남지 않아 중복 메시지 문제도 해소.
     """
     try:
         await asyncio.wait_for(
@@ -233,8 +187,6 @@ async def _open_pdf_in_sidebar(filename: str, tmp_path: Path) -> None:
             timeout=PDF_SEND_TIMEOUT,
         )
         await asyncio.wait_for(
-            # display 파라미터는 지정하지 않음 — ElementSidebar 컨텍스트에선 불필요.
-            # page 파라미터도 제거 (C1 조사에서 원인 아님 확인됨).
             cl.ElementSidebar.set_elements([cl.Pdf(name=filename, path=str(tmp_path))]),
             timeout=PDF_SEND_TIMEOUT,
         )
@@ -246,10 +198,7 @@ async def _open_pdf_in_sidebar(filename: str, tmp_path: Path) -> None:
 
 
 async def _close_sidebar() -> None:
-    """사이드바 닫기 (#117 C3).
-
-    공식 문서: "Setting the elements to an empty array will close the sidebar."
-    """
+    """사이드바 닫기 (#117 C3). set_elements([]) = close."""
     try:
         await asyncio.wait_for(
             cl.ElementSidebar.set_elements([]),
@@ -263,12 +212,7 @@ async def _close_sidebar() -> None:
 
 
 def _index_in_background(chunks: list[dict], doc_id: str) -> None:
-    """별도 스레드에서 인덱싱 실행 (fire-and-forget).
-
-    bge-m3는 CPU 연산으로 GIL을 잡으므로 asyncio.to_thread로 감싸도
-    이벤트 루프를 블로킹함. 따라서 threading.Thread로 완전히 분리하여
-    이벤트 루프와 독립적으로 실행한다.
-    """
+    """별도 스레드에서 인덱싱 실행 (fire-and-forget)."""
     import threading
 
     def _run():
@@ -283,19 +227,7 @@ def _index_in_background(chunks: list[dict], doc_id: str) -> None:
 
 
 def _warmup_reranker_in_background() -> None:
-    """별도 스레드에서 reranker 싱글턴을 미리 로드 (fire-and-forget).
-
-    업로드 완료 직후 호출. 사용자가 요약/차트를 읽는 자연 대기 시간(30s~1min)에
-    bge-reranker-v2-m3 모델을 미리 싱글턴으로 로드해두어 첫 Q&A의 cold start를
-    제거한다. (#109)
-
-    bge-reranker-v2-m3도 bge-m3와 같은 sentence-transformers 계열이라 CPU 연산으로
-    GIL을 길게 잡으므로 asyncio.to_thread 금지. threading.Thread로 완전히 분리.
-    실패 시 graceful skip — Q&A 시점에 _aget_reranker가 다시 시도하지는 않지만
-    (sentinel 처리) reranking 스킵 후 RRF 결과가 그대로 LLM 컨텍스트로 전달되어
-    Q&A 자체는 정상 동작한다.
-    (선례: _index_in_background)
-    """
+    """별도 스레드에서 reranker 싱글턴을 미리 로드 (fire-and-forget). (#109)"""
     import threading
 
     def _run():
@@ -309,8 +241,107 @@ def _warmup_reranker_in_background() -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+class _QaStageTracker:
+    """Q&A 진행 Step 핸들러 (#108).
+
+    summarizer.qa.ask()가 발행하는 on_stage 이벤트를 cl.Step 시작/종료로 매핑.
+    답변 메시지 안에 접힌 형태로 3개 Step이 차례로 전개된다:
+
+      [답변 메시지]
+        ├─ 문서 검색    (BM25 + Dense + RRF)       ~3s
+        ├─ 관련성 재정렬 (bge-reranker-v2-m3)      10~60s+
+        └─ 답변 생성    (GPT-5.2)                  ~3s
+
+    각 Step은 시작 시점에 input을 "⏳ 진행 중..." 문구로 채우고, 종료 시점에
+    output을 "✅ 완료 (N.Ns)"로 채운다. 사용자는 답변 본문에 집중하고 필요 시
+    Step을 펼쳐 병목 위치를 확인 (ChatGPT thought 펴보기 UX).
+
+    cold start 감지:
+      is_reranker_loaded()가 False면 rerank_start 시점에 "모델 최초 로드 중
+      (최대 2분)" 안내로 input 교체. #109 워밍업이 성공했으면 일반 문구.
+
+    예외 처리 제약:
+      ask()가 최상위 except로 예외를 삼키므로 Step은 "성공"으로 표시되지만
+      답변 본문이 "⚠️ [답변 생성 실패]"로 나타나 실패 신호는 사용자에게 전달됨.
+      완전한 Step FAILED 전파는 ask()의 예외 처리 구조 재설계가 필요해 #108
+      범위 초과.
+    """
+
+    # Step 이벤트 쌍 → (Step 이름, Step type) 매핑.
+    _STAGE_CONFIG: dict[str, tuple[str, str]] = {
+        "search": ("문서 검색", "retrieval"),
+        "rerank": ("관련성 재정렬", "rerank"),
+        "answer": ("답변 생성", "llm"),
+    }
+
+    def __init__(self) -> None:
+        self._steps: dict[str, cl.Step] = {}
+        self._t0: dict[str, float] = {}
+
+    async def handle(self, event: str) -> None:
+        """ask()가 전달하는 이벤트 이름을 Step 시작/종료로 라우팅."""
+        if event.endswith("_start"):
+            stage = event[: -len("_start")]
+            await self._start(stage)
+        elif event.endswith("_done"):
+            stage = event[: -len("_done")]
+            await self._finish(stage)
+        else:
+            logger.debug("알 수 없는 stage 이벤트: %s", event)
+
+    async def _start(self, stage: str) -> None:
+        name, type_ = self._STAGE_CONFIG.get(stage, (stage, "undefined"))
+        step = cl.Step(name=name, type=type_)
+        await step.__aenter__()
+
+        step.input = self._initial_input(stage)
+
+        try:
+            await step.update()
+        except Exception as e:
+            # Step.update 실패는 UI 표시 문제일 뿐 Q&A 본체는 계속 진행.
+            logger.warning("Step update 실패 (stage=%s): %s", stage, e)
+
+        self._steps[stage] = step
+        self._t0[stage] = time.monotonic()
+
+    async def _finish(self, stage: str) -> None:
+        step = self._steps.pop(stage, None)
+        if step is None:
+            # _start 없이 _done이 오는 케이스 방어 (정상 흐름에선 발생 안 함).
+            logger.debug("stage %s의 Step 컨텍스트 없음 — skip", stage)
+            return
+
+        elapsed = time.monotonic() - self._t0.pop(stage, time.monotonic())
+        step.output = f"✅ 완료 ({elapsed:.1f}s)"
+
+        try:
+            await step.__aexit__(None, None, None)
+        except Exception as e:
+            logger.warning("Step __aexit__ 실패 (stage=%s): %s", stage, e)
+
+    def _initial_input(self, stage: str) -> str:
+        """Step 시작 시 input 영역에 표시할 문구."""
+        if stage == "search":
+            return "⏳ BM25 + Dense + RRF 실행 중..."
+        if stage == "rerank":
+            # cold start 감지: reranker 싱글턴 미로드 시 안내 강화.
+            # #109 워밍업이 성공했으면 is_reranker_loaded()가 True라 일반 문구.
+            if not is_reranker_loaded():
+                return "⏳ bge-reranker-v2-m3 모델 최초 로드 중 (최대 2분 소요)..."
+            return "⏳ 재정렬 실행 중..."
+        if stage == "answer":
+            return "⏳ GPT-5.2 응답 생성 중..."
+        return "⏳ 실행 중..."
+
+
 async def _run_qa(question: str) -> None:
-    """Q&A 공통 실행 — on_message / on_followup 양쪽에서 사용."""
+    """Q&A 공통 실행 — on_message / on_followup 양쪽에서 사용.
+
+    #108: ask()에 on_stage 콜백을 전달해 검색/재정렬/답변 3구간을 cl.Step으로
+    가시화. reranker cold start(최대 1분+) 구간에서 "응답 없음" 체감 제거.
+    Step은 답변 메시지 안에 접힌 형태로 붙고, 펼치면 각 구간 경과시간 확인.
+    """
     result     = cl.user_session.get("result")
     summary    = _to_summary_result(result)
     raw_chunks = cl.user_session.get("raw_chunks") or []
@@ -320,7 +351,11 @@ async def _run_qa(question: str) -> None:
         await cl.Message(content="먼저 문서를 업로드해 주세요.").send()
         return
 
-    qa_result = await ask(question, summary, raw_chunks, None, doc_id)
+    tracker = _QaStageTracker()
+    qa_result = await ask(
+        question, summary, raw_chunks, None, doc_id,
+        on_stage=tracker.handle,
+    )
     await _send_qa_answer(qa_result)
 
 
@@ -425,7 +460,6 @@ async def on_message(message: cl.Message):
         task4.status = cl.TaskStatus.RUNNING
         await task_list.send()
 
-        # 인덱싱 백그라운드 + 요약 (핵심: bge-m3 GIL 블로킹 방지)
         _index_in_background(chunks, filename)
         step3 = await run_step3(step2)
 
@@ -447,8 +481,6 @@ async def on_message(message: cl.Message):
         cl.user_session.set("result", step3)
         cl.user_session.set("raw_chunks", raw_chunks)
         cl.user_session.set("doc_id", doc_id)
-        # PDF 경로를 세션에 저장 → 나중에 open_pdf action_callback에서 꺼내 씀.
-        # 새 문서가 업로드됐으므로 사이드바 상태 리셋 (이전 PDF 정보 초기화).
         if tmp_path.suffix.lower() == ".pdf":
             cl.user_session.set("pdf_path", str(tmp_path))
         else:
@@ -467,13 +499,9 @@ async def on_message(message: cl.Message):
         else:
             await cl.Message(content="⚠️ 전체 요약을 생성하지 못했습니다.").send()
 
-        # 차트
         if summary:
             await _render_charts(summary)
 
-        # 추천 질문 버튼 (cl.Action).
-        # PDF인 경우 "📂 원본 PDF 열기/닫기" 토글 액션을 뒤에 추가 (#117 C3).
-        # on_open_pdf에서 세션 플래그 pdf_sidebar_open 기준으로 열기/닫기 분기.
         actions = _build_follow_ups(summary)
         if tmp_path.suffix.lower() == ".pdf":
             actions.append(cl.Action(
@@ -483,10 +511,6 @@ async def on_message(message: cl.Message):
             ))
         await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
 
-        # reranker 사전 워밍업 (fire-and-forget) — 첫 Q&A cold start 제거 (#109)
-        # 사용자가 요약/차트를 읽는 자연 대기 시간에 백그라운드 스레드에서
-        # bge-reranker-v2-m3 싱글턴을 미리 로드. 추천 질문 메시지 send 이후에
-        # 호출하여 업로드 플로우의 모든 스트리밍이 끝난 뒤 GIL 경합을 최소화.
         _warmup_reranker_in_background()
         return
 
@@ -496,12 +520,7 @@ async def on_message(message: cl.Message):
 
 @cl.action_callback("followup")
 async def on_followup(action: cl.Action):
-    """추천 질문 버튼 클릭 시 호출.
-
-    user 메시지로 질문 텍스트를 띄우고 그대로 _run_qa에 넘김.
-    과거 HybridDataLayer 환경에서는 이 콜백이 on_chat_start를 재트리거하여
-    세션이 리셋되는 버그가 있었음. SQLAlchemy 환경에서 재현 여부 확인 필요.
-    """
+    """추천 질문 버튼 클릭 시 호출."""
     question = action.payload["value"]
     await cl.Message(content=question, author="user").send()
     await _run_qa(question)
@@ -509,18 +528,7 @@ async def on_followup(action: cl.Action):
 
 @cl.action_callback("open_pdf")
 async def on_open_pdf(action: cl.Action):
-    """원본 PDF 사이드바 토글 (#117 C3).
-
-    세션 플래그 pdf_sidebar_open 기준으로 열기/닫기 분기:
-      - False → _open_pdf_in_sidebar 호출, 플래그 True로
-      - True  → _close_sidebar 호출, 플래그 False로
-
-    ElementSidebar API를 사용하므로 메시지가 chat 히스토리에 남지 않고
-    사이드바만 조작됨. 이슈에 보고된 "📂 원문 보기 — 파일명.pdf 메시지 3번 중복"
-    현상이 구조적으로 발생하지 않는다.
-
-    세션에 pdf_path가 없으면 (비-PDF 문서 or 세션 리셋) 안내 메시지만 출력.
-    """
+    """원본 PDF 사이드바 토글 (#117 C3)."""
     pdf_path_str = cl.user_session.get("pdf_path")
     doc_id       = cl.user_session.get("doc_id")
 
