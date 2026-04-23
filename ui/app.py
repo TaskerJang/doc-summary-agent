@@ -200,42 +200,66 @@ async def _render_charts(summary: SummaryResult) -> None:
         logger.info("차트 렌더링 완료 — %d개 출력 (size=%s)", rendered, CHART_SIZE)
 
 
-async def _send_pdf_side_panel(filename: str, tmp_path: Path) -> None:
-    """PDF 원문을 사이드 패널 트리거 메시지로 전송.
+async def _open_pdf_in_sidebar(filename: str, tmp_path: Path) -> None:
+    """PDF를 사이드바에 직접 푸시 (#117 C3).
 
-    Chainlit 공식 문서에 따르면 display="side"인 엘리먼트는:
-    "The image will not be displayed in the message. Instead, the name
-    of the image will be displayed as clickable link. When the user
-    clicks on the link, the image will be displayed on the side of
-    the message."
+    [배경] C1~C2 조사로 cl.Pdf(display="side")는 엘리먼트 마운트 즉시 사이드를
+    자동으로 펼치는 업스트림 버그가 확정됨 (Chainlit 2.11.0). content에서
+    파일명을 제거해 링크 렌더를 차단해도 사이드가 여전히 열리므로
+    "엘리먼트 존재 자체"가 트리거임이 드러남. display="side" 경로는 포기.
 
-    즉 메시지 content의 {filename} 부분이 element name과 매칭되어
-    클릭 가능한 링크로만 보이고, 사용자가 클릭해야 사이드 패널이 열린다 —
-    공식 문서 기준으로는. (#111)
+    [대안] 공식 ElementSidebar API는 메시지에 엘리먼트를 붙이지 않고 사이드바에
+    직접 set_elements/set_title을 호출하는 저수준 경로로, display="side"의
+    자동 링크 치환 로직을 완전히 우회한다. 버그 경로를 아예 안 탄다.
 
-    그러나 실제로는 업로드 직후 자동으로 사이드가 열리는 현상이 재현됨.
-    원인 불명 (Chainlit 버전 특정 동작 추정). 이 함수 자체는 그대로 두고
-    호출 시점을 on_message 업로드 플로우 → open_pdf action_callback으로
-    이동하여 자동 열림을 원천 차단. 사용자가 "📂 원본 PDF 열기" 버튼을
-    눌렀을 때만 이 함수가 호출되므로 버튼 → 링크 → 사이드 흐름으로 제한됨.
+    https://docs.chainlit.io/concepts/element (Element Sidebar 섹션):
+        "Setting elements will open the sidebar ...
+         Setting the elements to an empty array will close the sidebar"
 
-    blob_storage 미설정 환경에서 create_element가 경고만 뿌리고 지나가므로
-    시도해볼 가치가 있음. 만약 실제로 블로킹되면 PDF_SEND_TIMEOUT에서 끊긴다.
-    resume 시 복원은 blob_storage 연결(#101) 후에만 가능.
+    [효과]
+      - 자동 열림 버그 해소: cl.Pdf에 display="side" 파라미터 자체를 안 씀
+      - 링크 메시지 제거: cl.Message(...) 호출이 사라져 "📂 원문 보기 —" 메시지가
+        chat 히스토리에 남지 않음 → 이슈에 보고된 "메시지 3번 중복" 현상도 자연 소멸
+      - 토글 가능: 같은 버튼으로 열고 닫기 (set_elements([])로 close)
+
+    [제약]
+      - ElementSidebar 엘리먼트는 persist되지 않음 (공식 문서 명시).
+        세션 resume 시에는 사이드가 비어있는 상태로 시작하며 사용자가 버튼을
+        다시 눌러야 한다. 현재 UX로는 수용 가능.
     """
     try:
         await asyncio.wait_for(
-            cl.Message(
-                content=f"📂 원문 보기 — {filename}",
-                elements=[cl.Pdf(name=filename, display="side", path=str(tmp_path), page=1)],
-            ).send(),
+            cl.ElementSidebar.set_title(f"📂 {filename}"),
             timeout=PDF_SEND_TIMEOUT,
         )
-        logger.info("PDF 사이드 링크 전송 완료: %s", filename)
+        await asyncio.wait_for(
+            # display 파라미터는 지정하지 않음 — ElementSidebar 컨텍스트에선 불필요.
+            # page 파라미터도 제거 (C1 조사에서 원인 아님 확인됨).
+            cl.ElementSidebar.set_elements([cl.Pdf(name=filename, path=str(tmp_path))]),
+            timeout=PDF_SEND_TIMEOUT,
+        )
+        logger.info("PDF 사이드바 열기 완료: %s", filename)
     except asyncio.TimeoutError:
-        logger.warning("PDF 뷰어 전송 타임아웃 (%ds 초과): %s", PDF_SEND_TIMEOUT, filename)
+        logger.warning("PDF 사이드바 열기 타임아웃 (%ds 초과): %s", PDF_SEND_TIMEOUT, filename)
     except Exception as e:
-        logger.warning("PDF 뷰어 전송 실패: %s — %s", filename, e)
+        logger.warning("PDF 사이드바 열기 실패: %s — %s", filename, e)
+
+
+async def _close_sidebar() -> None:
+    """사이드바 닫기 (#117 C3).
+
+    공식 문서: "Setting the elements to an empty array will close the sidebar."
+    """
+    try:
+        await asyncio.wait_for(
+            cl.ElementSidebar.set_elements([]),
+            timeout=PDF_SEND_TIMEOUT,
+        )
+        logger.info("PDF 사이드바 닫기 완료")
+    except asyncio.TimeoutError:
+        logger.warning("PDF 사이드바 닫기 타임아웃")
+    except Exception as e:
+        logger.warning("PDF 사이드바 닫기 실패: %s", e)
 
 
 def _index_in_background(chunks: list[dict], doc_id: str) -> None:
@@ -306,6 +330,8 @@ async def on_chat_start():
     cl.user_session.set("raw_chunks", [])
     cl.user_session.set("doc_id", None)
     cl.user_session.set("pdf_path", None)
+    # 사이드바 열림 상태 — open_pdf 액션이 토글 기준으로 삼는다 (#117 C3)
+    cl.user_session.set("pdf_sidebar_open", False)
     settings = await cl.ChatSettings([
         Switch(id="chart_enabled", label="차트 자동 생성",
                description="문서 분석 후 수치 데이터를 Plotly 차트로 자동 렌더링합니다.", initial=True),
@@ -422,11 +448,12 @@ async def on_message(message: cl.Message):
         cl.user_session.set("raw_chunks", raw_chunks)
         cl.user_session.set("doc_id", doc_id)
         # PDF 경로를 세션에 저장 → 나중에 open_pdf action_callback에서 꺼내 씀.
-        # 업로드 직후 cl.Pdf 엘리먼트를 전송하지 않으므로 자동 사이드 열림 차단.
+        # 새 문서가 업로드됐으므로 사이드바 상태 리셋 (이전 PDF 정보 초기화).
         if tmp_path.suffix.lower() == ".pdf":
             cl.user_session.set("pdf_path", str(tmp_path))
         else:
             cl.user_session.set("pdf_path", None)
+        cl.user_session.set("pdf_sidebar_open", False)
         summary = _to_summary_result(step3)
 
         # 전체 요약
@@ -444,21 +471,15 @@ async def on_message(message: cl.Message):
         if summary:
             await _render_charts(summary)
 
-        # PDF 원문 — on-demand only (#111)
-        # 이전에는 여기서 _send_pdf_side_panel을 자동 호출했으나, Chainlit이
-        # cl.Pdf(display="side")를 받으면 링크 클릭 없이도 사이드 패널을 자동
-        # 펼치는 현상이 재현되어 자동 호출을 제거. 대신 추천 질문 메시지 옆에
-        # "📂 원본 PDF 열기" Action 버튼을 추가하여 사용자가 눌렀을 때만
-        # _send_pdf_side_panel이 호출되도록 함 (open_pdf callback 참조).
-
-        # 추천 질문 버튼 (cl.Action) — SQLAlchemy 환경에서 재시도.
-        # PDF인 경우 "📂 원본 PDF 열기" 액션을 뒤에 추가.
+        # 추천 질문 버튼 (cl.Action).
+        # PDF인 경우 "📂 원본 PDF 열기/닫기" 토글 액션을 뒤에 추가 (#117 C3).
+        # on_open_pdf에서 세션 플래그 pdf_sidebar_open 기준으로 열기/닫기 분기.
         actions = _build_follow_ups(summary)
         if tmp_path.suffix.lower() == ".pdf":
             actions.append(cl.Action(
                 name="open_pdf",
-                payload={},   # 필요한 정보는 세션에서 꺼내므로 payload 불필요
-                label="📂 원본 PDF 열기",
+                payload={},
+                label="📂 원본 PDF 열기/닫기",
             ))
         await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
 
@@ -488,11 +509,15 @@ async def on_followup(action: cl.Action):
 
 @cl.action_callback("open_pdf")
 async def on_open_pdf(action: cl.Action):
-    """원본 PDF 열기 버튼 클릭 시 호출 (#111).
+    """원본 PDF 사이드바 토글 (#117 C3).
 
-    업로드 시점이 아닌 명시적 사용자 액션 시점에만 cl.Pdf(display="side")를
-    전송하여 Chainlit의 자동 사이드 열림 이슈를 우회. 버튼 클릭 → 링크
-    메시지 전송 → 사용자가 링크 클릭 → 사이드 패널 열림 흐름이 보장됨.
+    세션 플래그 pdf_sidebar_open 기준으로 열기/닫기 분기:
+      - False → _open_pdf_in_sidebar 호출, 플래그 True로
+      - True  → _close_sidebar 호출, 플래그 False로
+
+    ElementSidebar API를 사용하므로 메시지가 chat 히스토리에 남지 않고
+    사이드바만 조작됨. 이슈에 보고된 "📂 원문 보기 — 파일명.pdf 메시지 3번 중복"
+    현상이 구조적으로 발생하지 않는다.
 
     세션에 pdf_path가 없으면 (비-PDF 문서 or 세션 리셋) 안내 메시지만 출력.
     """
@@ -509,4 +534,10 @@ async def on_open_pdf(action: cl.Action):
         await cl.Message(content="⚠️ 업로드된 PDF 파일을 찾을 수 없습니다. 파일을 다시 업로드해 주세요.").send()
         return
 
-    await _send_pdf_side_panel(doc_id, pdf_path)
+    is_open = bool(cl.user_session.get("pdf_sidebar_open", False))
+    if is_open:
+        await _close_sidebar()
+        cl.user_session.set("pdf_sidebar_open", False)
+    else:
+        await _open_pdf_in_sidebar(doc_id, pdf_path)
+        cl.user_session.set("pdf_sidebar_open", True)
