@@ -62,24 +62,18 @@
  *
  * 해결:
  *   1) 파란 Alert 박스는 완전히 숨김 (display:none).
- *   2) #thread-history::before로 "Recents" 가짜 헤더를 상시 삽입.
- *      - 스레드 있을 때: "Recents" + 기존 group-label("오늘"/"어제") 병존
- *      - 스레드 없을 때: "Recents"만 노출, 아래는 빈 공간
+ *   2) #thread-history::before로 "최근대화" 가짜 헤더를 상시 삽입.
+ *      - 스레드 있을 때: "최근대화" + 기존 group-label("오늘"/"어제") 병존
+ *      - 스레드 없을 때: "최근대화"만 노출, 아래는 빈 공간
  *   3) 헤더 스타일은 shadcn sidebar group-label 톤에 맞춤
  *      (text-xs, 회색 톤, uppercase 없이 자연스럽게).
  *
  * 범위 제한:
  *   #thread-history 내부만 타겟팅. 전역 ID라 안전.
  *   본문 영역 Alert나 다른 파란색 박스에는 영향 없음.
- *
- * 유지보수 노트:
- *   - Chainlit 업스트림이 `#thread-history` ID를 제거하면 상위
- *     `[data-sidebar="menu"]`로 셀렉터 이동 필요.
- *   - "Recents" 라벨 변경은 content 값만 수정하면 됨 (영어 고정이
- *     마음에 안 들면 "최근 대화" 등으로 교체 가능).
  */
 
-/* "Recents" 가짜 헤더 — 항상 노출 (스레드 유무 무관) */
+/* "최근대화" 가짜 헤더 — 항상 노출 (스레드 유무 무관) */
 #thread-history::before {
     content: "최근대화";
     display: flex;
@@ -96,5 +90,54 @@
 /* 스레드 없을 때의 파란 Alert 박스 완전히 숨김 */
 #thread-history > .alert,
 #thread-history > div[class*="bg-blue-"] {
+    display: none !important;
+}
+
+/*
+ * ──────────────────────────────────────────────────────────────
+ * [3] Chat Resume 세션 스냅샷 Step UI 숨김 (#99)
+ * ──────────────────────────────────────────────────────────────
+ * 배경: #99 Chat Resume 구현에서 세션 상태(doc_id, summary, chunks_path)를
+ *       thread에 영속화하기 위해 `_session_snapshot` 이름의 내부 Step을
+ *       생성. Chainlit 2.10.1 UI는 이 step을 채팅창에 보이게 표시하는데,
+ *       사용자 입장에서는 "짜치는" 내부 정보 노출.
+ *
+ * 실측 DOM (브라우저 devtools, Chainlit 2.10.1):
+ *   <button id="step-_session_snapshot" ...>
+ *     <span></span>
+ *     _session_snapshot
+ *     <svg class="lucide lucide-chevron-down" ...>
+ *   </button>
+ *
+ * 해결: id 셀렉터로 step button을 찾고, 상위 컨테이너(가장 가까운
+ *       메시지 row)까지 숨김. Chainlit step UI는 보통:
+ *         message-container
+ *           └ step-wrapper
+ *               └ collapsible-trigger (button#step-xxx)
+ *               └ collapsible-content
+ *       구조라 :has()로 button을 품은 상위를 찾아 없애는 게 가장 확실.
+ *
+ * 브라우저 호환: :has()는 모던 브라우저(Chrome/Edge/Safari 최신) 지원.
+ * 구형 브라우저에서는 button만 숨겨지고 주변 빈 공간은 남을 수 있음 —
+ * UX 우선순위가 낮아 수용 가능.
+ */
+
+/* 버튼 자체 숨김 (가장 안쪽 fallback) */
+button#step-_session_snapshot {
+    display: none !important;
+}
+
+/* 버튼을 포함하는 상위 컨테이너까지 숨김 — :has() 지원 브라우저 */
+:has(> button#step-_session_snapshot),
+div:has(> button#step-_session_snapshot),
+div:has(> div > button#step-_session_snapshot),
+div:has(> div > div > button#step-_session_snapshot) {
+    display: none !important;
+}
+
+/* Radix collapsible 전체 wrapper 숨김 — button의 aria-controls가 가리키는
+   content까지 포함. id는 동적이므로 aria-labelledby 기반으로 찾기는
+   어려워서 :has()에 의존. */
+[data-radix-collection-item]:has(button#step-_session_snapshot) {
     display: none !important;
 }
