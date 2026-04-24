@@ -645,10 +645,16 @@ async def on_chat_resume(thread: ThreadDict):
       - user_session은 on_chat_start와 동일하게 초기화
       - Q&A 시도 시 _run_qa가 graceful degrade (안내 메시지)
 
-    재렌더링하지 않는 것:
-      - 답변 메시지 본문 · TaskList · 추천 질문 버튼 — Chainlit이 thread 히스토리로 복원
-      - 차트(cl.Plotly) — figure 직렬화가 blob_storage에 의존(이슈 #73)
-      - 원본 PDF 업로드 파일 — 서버 임시 경로라 소실 확정
+    재렌더링 범위 (의도적 구분):
+      ✅ 추천 질문 버튼 (`cl.Action`) — 2.10.1이 resume 시 버튼을 살려내지
+         못해 재전송 필수. generate_follow_ups는 ~2-3초 LLM 호출이라 부담 경미.
+      ❌ 차트(cl.Plotly) — figure 직렬화가 blob_storage(#73) 미설정으로 실패.
+         chart_spec에서 재생성은 가능하지만 메시지 히스토리 끝에 달라붙어
+         순서 어색 + 추가 3-5초 부담. 완전 복원은 #73 도입 후.
+      ❌ 원본 PDF 열기 버튼 — 서버 임시 경로 소실. 버튼 만들면 "PDF 없음"
+         에러만 떠 혼란 유발 → 렌더링 안 함.
+
+      - 답변 메시지 본문 · TaskList — Chainlit이 thread 히스토리로 복원
     """
     # user_session 초기화 (on_chat_start와 동일)
     cl.user_session.set("result", None)
@@ -718,6 +724,29 @@ async def on_chat_resume(thread: ThreadDict):
                 "Q&A를 다시 하시려면 새 대화에서 문서를 재업로드해 주세요."
             )
         ).send()
+        # chunks 소실 상태에선 추천 질문 버튼을 내놓아도 클릭 시 Q&A 불가라
+        # 오히려 혼란 → 렌더링 건너뛰고 조기 리턴.
+        return
+
+    # 추천 질문 버튼 재렌더링 (#99).
+    #
+    # 왜 재렌더가 필요한가:
+    #   Chainlit 2.10.1은 `cl.Action`을 thread에 persist하지만 resume 시
+    #   UI에 "살아있는" 버튼으로 복원하지 않는다. 기존 메시지의 버튼은
+    #   클릭해도 아무 일이 일어나지 않는 상태. 따라서 새 메시지로 재전송.
+    #
+    # UX 관점:
+    #   기존(비활성) 버튼 메시지 아래에 새 버튼 메시지가 추가됨 → 약간의
+    #   시각적 중복이 있지만 "옛날 건 죽었고 새 건 살아있다"는 기대를
+    #   정직하게 반영. 대안(기존 메시지 삭제)은 Chainlit API 미지원.
+    summary_obj = _to_summary_result({"summary": summary_dict})
+    if summary_obj:
+        try:
+            actions = _build_follow_ups(summary_obj)
+            await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
+        except Exception as e:
+            # 추천 질문 재생성(LLM 호출) 실패는 resume 전체를 깨지 않도록 warning만.
+            logger.warning("추천 질문 재렌더링 실패: %s", e)
 
 
 @cl.on_settings_update
