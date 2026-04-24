@@ -87,6 +87,10 @@ cot = "full"
 alert_style = "classic"
 logo_file_url = ""
 default_avatar_file_url = ""
+# 커스텀 CSS — public/stylesheet.css 로드 (Chainlit 2.10.1은 명시 필요)
+# - Plotly 인라인 차트 높이 수정
+# - 사이드바 "스레드 없음" 빈 상태 UI 톤다운
+custom_css = "/public/stylesheet.css"
 
 [meta]
 generated_by = "2.10.1"
