@@ -81,7 +81,7 @@
 
 /* "Recents" 가짜 헤더 — 항상 노출 (스레드 유무 무관) */
 #thread-history::before {
-    content: "Recents";
+    content: "최근대화";
     display: flex;
     align-items: center;
     height: 32px;
