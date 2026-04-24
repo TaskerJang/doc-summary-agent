@@ -287,7 +287,6 @@ def _extract_snapshot_payload(snapshot: dict) -> dict:
     # 1차: metadata
     payload = _parse_snapshot_payload(snapshot.get("metadata"), source_hint="metadata")
     if payload:
-        logger.debug("snapshot payload: metadata 경로 성공")
         return payload
 
     # 2차: output
@@ -296,13 +295,8 @@ def _extract_snapshot_payload(snapshot: dict) -> dict:
         logger.info("snapshot payload: output fallback 사용")
         return payload
 
-    # 둘 다 실패 — 이미 _parse_snapshot_payload 내부에서 raw 샘플 로깅됨.
-    logger.warning(
-        "snapshot payload 추출 실패 — keys=%s metadata_type=%s output_type=%s",
-        list(snapshot.keys()),
-        type(snapshot.get("metadata")).__name__,
-        type(snapshot.get("output")).__name__,
-    )
+    # 둘 다 실패 — _parse_snapshot_payload 내부에서 raw 샘플 로깅됨.
+    logger.warning("snapshot payload 추출 실패 — metadata/output 모두 파싱 불가")
     return {}
 
 
@@ -676,22 +670,6 @@ async def on_chat_resume(thread: ThreadDict):
 
     # ChatSettings 재설정 (Chainlit #1391 워크어라운드) — snapshot 유무와 무관하게 필요.
     await _build_chat_settings()
-
-    # 디버그: thread["steps"]에서 snapshot 관련 step 구조 덤프 (문제 진단용).
-    steps = thread.get("steps") or []
-    snapshot_like = [s for s in steps if s.get("name", "").endswith("session_snapshot")]
-    logger.info(
-        "on_chat_resume 진입: thread_id=%s total_steps=%d snapshot_like=%d",
-        thread.get("id"), len(steps), len(snapshot_like),
-    )
-    for i, s in enumerate(snapshot_like):
-        keys = list(s.keys())
-        has_meta = bool(s.get("metadata"))
-        has_output = bool(s.get("output"))
-        logger.info(
-            "  snapshot[%d] name=%r keys=%s has_metadata=%s has_output=%s",
-            i, s.get("name"), keys, has_meta, has_output,
-        )
 
     snapshot = _find_snapshot(thread)
     if not snapshot:
