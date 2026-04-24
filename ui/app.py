@@ -10,6 +10,7 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 import chainlit as cl
 from chainlit.input_widget import Slider, Switch
@@ -33,7 +34,11 @@ _APP_PASSWORD = os.getenv("APP_PASSWORD", "1234!")
 # ── #99 Chat Resume — 세션 상태 스냅샷 ────────────────────────────
 # raw_chunks는 크기가 커서 step metadata에 넣으면 DB row가 비대해지므로
 # doc_id 기반 별도 JSON 파일로 분리 저장. snapshot step은 경량 포인터만 보유.
-_SNAPSHOT_STEP_NAME = "_session_snapshot"
+#
+# Step name은 앞에 점(.)을 붙여 Chainlit 2.10.1 기본 UI에서 "시스템 내부 step"
+# 으로 인식되도록 유도 (실제 필터링은 프런트 쪽 처리라 100% 숨김은 아니지만
+# avatar/라벨 노출을 최소화). type="undefined"는 아바타를 안 붙인다.
+_SNAPSHOT_STEP_NAME = ".session_snapshot"
 _CHUNKS_STORAGE_DIR = Path(os.getenv("CHUNKS_STORAGE_DIR", "/tmp/doc-summary-agent/chunks"))
 
 
@@ -134,6 +139,59 @@ def _load_chunks_from_disk(path_str: str) -> list[str]:
         return []
 
 
+def _parse_snapshot_meta(raw_meta: Any) -> dict:
+    """snapshot step의 metadata를 dict로 보장 (#99 버그 수정).
+
+    SQLAlchemyDataLayer는 step metadata를 DB에 JSON 문자열로 저장하는데,
+    `get_thread` 응답에서는 dict로 역직렬화되지 않고 **문자열 그대로** 반환된다
+    (Chainlit 2.10.1 확인). 그래서 on_chat_resume에서 `meta.get("doc_id")`를
+    호출하면 `AttributeError: 'str' object has no attribute 'get'` 발생.
+
+    이 헬퍼는 세 가지 입력 모두 안전하게 dict로 정규화:
+      - dict: 그대로 반환
+      - str (JSON): json.loads로 파싱
+      - 기타/None/파싱 실패: 빈 dict 반환 + 경고 로그
+    """
+    if isinstance(raw_meta, dict):
+        return raw_meta
+    if isinstance(raw_meta, str):
+        try:
+            parsed = json.loads(raw_meta)
+            if isinstance(parsed, dict):
+                return parsed
+            logger.warning("snapshot metadata JSON이 dict 아님: type=%s", type(parsed).__name__)
+            return {}
+        except Exception as e:
+            logger.warning("snapshot metadata JSON 파싱 실패: err=%s raw=%r",
+                           e, (raw_meta[:120] + "...") if len(raw_meta) > 120 else raw_meta)
+            return {}
+    logger.warning("snapshot metadata 형식 미지원: type=%s", type(raw_meta).__name__)
+    return {}
+
+
+def _wrap_str_chunks_for_index(raw_chunks: list[str]) -> list[dict]:
+    """list[str] → list[dict] 래핑 (#99 버그 수정).
+
+    summarizer.embedder.index_chunks는 `chunk["text"]`를 요구해 dict 형식
+    필수. on_message 원 경로에서는 chunker의 list[dict]를 그대로 인덱싱에
+    넘겼지만, on_chat_resume에서는 raw_chunks(list[str])를 복원하므로
+    `c["text"]` 접근에서 `'str' object has no attribute 'get'` 에러 발생.
+
+    resume 경로는 원본 chunker 메타(chunk_index, section)를 잃은 상태라
+    최소 필드만 재구성 — 인덱싱 기능엔 영향 없음 (임베딩 대상은 text).
+    """
+    wrapped = []
+    for i, text in enumerate(raw_chunks):
+        if not text:
+            continue
+        wrapped.append({
+            "text": text,
+            "chunk_index": i,
+            "section": "",
+        })
+    return wrapped
+
+
 async def _save_session_snapshot(
     doc_id: str,
     summary_dict: dict,
@@ -144,12 +202,21 @@ async def _save_session_snapshot(
     `on_chat_resume`는 thread["steps"]에서 이 step을 찾아 metadata에서 역복원.
     name은 내부 상수(_SNAPSHOT_STEP_NAME)로 고정해 resume 시 필터링.
 
-    UI 노출을 막기 위해 cot="full" 설정에서도 튀지 않도록 input/output 비움.
-    실제로 Chainlit Step UI는 빈 input/output을 1줄로 접어서 표시하므로
-    사용자에게는 거의 보이지 않는다.
+    UI 노출 최소화 전략:
+      - name 앞에 "." 접두사 — 일부 Chainlit 필터가 시스템 step으로 인식
+      - type="undefined" — 아바타 미생성
+      - input/output 비움 — content 영역 최소화
+      - show_input=False — input 영역 접기
+    그럼에도 Chainlit 2.10.1 UI는 이 step을 완전히 숨기지는 않는다(프런트
+    필터 범위 밖). 최악의 경우 짧은 구분선 하나 정도로 표시되어 기존
+    파란 Alert보다는 훨씬 덜 거슬림.
     """
     try:
-        async with cl.Step(name=_SNAPSHOT_STEP_NAME, type="tool", show_input=False) as snap:
+        async with cl.Step(
+            name=_SNAPSHOT_STEP_NAME,
+            type="undefined",
+            show_input=False,
+        ) as snap:
             snap.input = ""
             snap.output = ""
             snap.metadata = {
@@ -164,13 +231,17 @@ async def _save_session_snapshot(
 
 
 def _find_snapshot(thread: ThreadDict) -> dict | None:
-    """thread["steps"]에서 _session_snapshot step을 검색 (#99).
+    """thread["steps"]에서 snapshot step을 검색 (#99).
 
     같은 thread에 여러 문서를 업로드했을 경우 여러 스냅샷이 쌓일 수 있어
     "가장 마지막" 것을 채택 (최신 상태 우선).
+
+    구 이름(`_session_snapshot`)으로 저장된 기존 thread와의 하위 호환을
+    위해 두 이름 모두 허용 — 필터링 후 있으면 그대로 사용.
     """
     steps = thread.get("steps") or []
-    snapshots = [s for s in steps if s.get("name") == _SNAPSHOT_STEP_NAME]
+    valid_names = {_SNAPSHOT_STEP_NAME, "_session_snapshot"}
+    snapshots = [s for s in steps if s.get("name") in valid_names]
     if not snapshots:
         return None
     return snapshots[-1]
@@ -318,14 +389,13 @@ async def _close_sidebar() -> None:
         logger.warning("PDF 사이드바 닫기 실패: %s", e)
 
 
-def _index_in_background(chunks: list, doc_id: str) -> None:
+def _index_in_background(chunks: list[dict], doc_id: str) -> None:
     """별도 스레드에서 인덱싱 실행 (fire-and-forget).
 
-    chunks 인자 타입:
-      - on_message 경로: list[dict] (chunker가 만든 원본 구조)
-      - on_chat_resume 경로: list[str] (raw_chunks) — summarizer.embedder가
-        dict도 str도 허용하는지 확인 필요. 문자열만 들어가도 동작하도록
-        설계되어 있다면 resume 경로는 그대로, 아니면 래핑이 필요.
+    chunks는 **list[dict]**만 받는다 — summarizer.embedder.index_chunks가
+    `chunk["text"]`, `chunk.get("section")` 등 dict 키 접근을 전제로 하기 때문.
+    on_chat_resume 경로에서는 list[str]이 복원되므로 호출 전에
+    `_wrap_str_chunks_for_index`로 래핑 필요.
     """
     import threading
 
@@ -537,6 +607,12 @@ async def on_chat_resume(thread: ThreadDict):
         이번 범위에서는 제외. 필요 시 후속 PR에서 on_chat_resume 전용 차트 섹션
         재삽입으로 추가.
       - 원본 PDF 업로드 파일 — 서버 임시 경로라 소실 확정
+
+    버그 수정 이력:
+      - step metadata가 str(JSON)로 들어오는 케이스 → `_parse_snapshot_meta`로
+        dict 정규화. SQLAlchemyDataLayer 역직렬화 안 되는 이슈 우회.
+      - _index_in_background에 list[str] 전달 시 AttributeError → 인덱싱
+        직전에 `_wrap_str_chunks_for_index`로 list[dict]로 래핑.
     """
     # user_session 초기화 (on_chat_start와 동일)
     cl.user_session.set("result", None)
@@ -553,7 +629,8 @@ async def on_chat_resume(thread: ThreadDict):
         logger.info("on_chat_resume: snapshot 없음 — thread_id=%s", thread.get("id"))
         return
 
-    meta = snapshot.get("metadata") or {}
+    # metadata는 SQLAlchemyDataLayer에서 JSON 문자열로 돌아올 수 있어 정규화.
+    meta = _parse_snapshot_meta(snapshot.get("metadata"))
     doc_id       = meta.get("doc_id") or ""
     summary_dict = meta.get("summary") or {}
     chunks_path  = meta.get("chunks_path") or ""
@@ -567,13 +644,13 @@ async def on_chat_resume(thread: ThreadDict):
 
     logger.info(
         "on_chat_resume: 복원 완료 doc_id=%s chunks=%d summary_sections=%d",
-        doc_id, len(raw_chunks), len(summary_dict.get("sections", [])),
+        doc_id, len(raw_chunks), len(summary_dict.get("sections", [])) if isinstance(summary_dict, dict) else 0,
     )
 
     # 벡터 인덱스 재구성 — 메모리 싱글턴이라 프로세스 재시작 후엔 비어있음.
-    # chunks가 있을 때만 의미 있음.
+    # chunks가 있을 때만 의미 있음. list[str] → list[dict] 래핑 필수.
     if raw_chunks:
-        _index_in_background(raw_chunks, doc_id)
+        _index_in_background(_wrap_str_chunks_for_index(raw_chunks), doc_id)
         _warmup_reranker_in_background()
     else:
         # chunks 파일 소실 — 사용자에게 왜 Q&A가 안 되는지 미리 알림.
