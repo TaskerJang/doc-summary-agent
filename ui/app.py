@@ -3,6 +3,7 @@ ui/app.py
 Chainlit UI 진입점 — ChatGPT 스타일
 파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → 추천 질문 버튼 + PDF 열기 → Q&A
 """
+import ast
 import asyncio
 import json
 import logging
@@ -33,16 +34,10 @@ _APP_USERNAME = os.getenv("APP_USERNAME", "admin")
 _APP_PASSWORD = os.getenv("APP_PASSWORD", "1234!")
 
 # ── #99 Chat Resume — 세션 상태 스냅샷 ────────────────────────────
-# 저장 전략: Step name은 `_session_snapshot` 고정. metadata는 Chainlit
-# SQLAlchemyDataLayer가 JSON 문자열로 저장하는데, thread["steps"]로 불러올 때
-# 역직렬화 여부가 버전에 따라 다르다. 최악의 경우 metadata 필드가 아예 빠지는
-# 것도 확인 — 그래서 백업으로 `output` 필드에도 같은 JSON을 넣는다 (output은
-# 확실히 persist/restore됨, 일반 Step 사용 사례와 동일).
+# 저장 전략: Step name은 `_session_snapshot` 고정. metadata + output 두 곳에
+# 동시 기록. 파싱 시 JSON → Python repr(ast) → 실패 순으로 다중 시도.
 #
-# UI 노출 최소화:
-#   - name 앞 "." 접두사는 2.10.1에서 실질적 필터링 효과 없음 (확인됨).
-#     대신 public/stylesheet.css에서 CSS 규칙으로 해당 step의 메시지 행을
-#     `display: none`으로 숨긴다.
+# UI 노출: public/stylesheet.css의 `#step-_session_snapshot` 셀렉터로 숨김.
 _SNAPSHOT_STEP_NAME = "_session_snapshot"
 
 # 크로스 플랫폼 임시 저장 경로. Windows에서도 tempfile.gettempdir()은
@@ -165,26 +160,49 @@ def _load_chunks_from_disk(path_str: str) -> list[str]:
         return []
 
 
-def _parse_snapshot_payload(raw: Any) -> dict:
-    """snapshot step의 payload(metadata 또는 output)를 dict로 보장 (#99).
+def _parse_snapshot_payload(raw: Any, source_hint: str = "") -> dict:
+    """snapshot step의 payload를 dict로 정규화 (#99).
 
-    Chainlit 2.10.1 SQLAlchemyDataLayer의 get_thread 응답:
-      - step.metadata: DB에 JSON 문자열로 저장되지만 복원 시 필드가 누락되는
-        경우가 관찰됨 (로그: metadata=None → doc_id='' chunks=0).
-      - step.output: 일반 Step 기능으로 확실히 persist + 복원 O.
+    다중 포맷 시도 — Chainlit 버전/DataLayer에 따라 저장 포맷이 달라질 수 있어
+    JSON → Python literal → 포기 순으로 시도:
 
-    그래서 저장 시 둘 다 쓰고, 복원 시 metadata 먼저 시도 → 실패 시 output.
-    이 헬퍼는 둘 중 어느 쪽을 넘겨도 안전하게 dict 정규화.
+      1. dict 그대로   → 반환
+      2. JSON 문자열    → json.loads 성공 시 반환
+      3. Python repr    → ast.literal_eval 성공 시 반환
+         (예: "{'doc_id': 'x', ...}" single-quote 포맷)
+      4. 그 외          → 경고 로그 + 빈 dict
+
+    실패 시 raw의 앞 200자를 로그로 남겨 실제 포맷 파악에 활용.
+
+    source_hint: "metadata" / "output" 등 호출 맥락 표시용.
     """
+    if raw is None:
+        return {}
     if isinstance(raw, dict):
         return raw
-    if isinstance(raw, str) and raw:
+    if not isinstance(raw, str) or not raw:
+        return {}
+
+    # 1차: JSON 파싱 (저장 시 json.dumps로 했다면 정상 경로)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception as json_err:
+        # 2차: Python literal (repr 포맷, single-quote dict)
         try:
-            parsed = json.loads(raw)
+            parsed = ast.literal_eval(raw)
             if isinstance(parsed, dict):
+                logger.info("snapshot payload[%s]: ast.literal_eval로 복원 성공", source_hint)
                 return parsed
-        except Exception:
-            pass
+        except Exception as ast_err:
+            # 두 파싱 모두 실패 — 원본 샘플 로그로 실제 포맷 파악.
+            sample = raw[:200] + "..." if len(raw) > 200 else raw
+            logger.warning(
+                "snapshot payload[%s] 파싱 실패: json_err=%s ast_err=%s sample=%r",
+                source_hint, json_err, ast_err, sample,
+            )
+
     return {}
 
 
@@ -215,11 +233,10 @@ async def _save_session_snapshot(
     """세션 상태를 thread에 Step으로 저장 (#99).
 
     저장 내용을 metadata와 output 두 곳에 동시에 기록:
-      - metadata: 원래 의도된 경로. 하지만 Chainlit 2.10.1에서 restore
-        누락이 관찰됨.
-      - output: 일반 Step 기능으로 확실히 persist. JSON 문자열로 인코딩.
+      - metadata: Chainlit이 자동으로 JSON 직렬화
+      - output: 직접 JSON 문자열로 인코딩해 기록 (백업 경로)
 
-    on_chat_resume는 metadata 먼저 시도 → 비면 output 파싱으로 fallback.
+    복원 시 어느 쪽이든 살아있으면 OK. 둘 다 파싱 가능하면 metadata 우선.
     """
     try:
         payload = {
@@ -262,35 +279,29 @@ def _find_snapshot(thread: ThreadDict) -> dict | None:
 
 
 def _extract_snapshot_payload(snapshot: dict) -> dict:
-    """snapshot step에서 payload 추출 — metadata 우선, output fallback (#99).
+    """snapshot step에서 payload 추출 — metadata / output 순서로 시도 (#99).
 
-    Chainlit 2.10.1에서 step.metadata가 복원 시 None으로 오는 케이스가 있어
-    output 필드에 JSON 백업을 둔 구조. 이 헬퍼가 두 경로를 순서대로 시도.
-
-    디버그 로그: snapshot 구조에서 어느 필드가 살아있는지 기록해 업스트림
-    버전 차이 파악에 활용.
+    두 필드 모두 시도하되 `_parse_snapshot_payload`가 JSON, Python literal 등
+    다중 포맷을 커버하므로 한 쪽만 살아있어도 복원 성공.
     """
-    # 1차: metadata (의도된 경로)
-    meta_raw = snapshot.get("metadata")
-    payload = _parse_snapshot_payload(meta_raw)
+    # 1차: metadata
+    payload = _parse_snapshot_payload(snapshot.get("metadata"), source_hint="metadata")
     if payload:
         logger.debug("snapshot payload: metadata 경로 성공")
         return payload
 
-    # 2차: output (fallback)
-    output_raw = snapshot.get("output")
-    payload = _parse_snapshot_payload(output_raw)
+    # 2차: output
+    payload = _parse_snapshot_payload(snapshot.get("output"), source_hint="output")
     if payload:
-        logger.info("snapshot payload: output fallback 사용 (metadata 복원 실패)")
+        logger.info("snapshot payload: output fallback 사용")
         return payload
 
-    # 둘 다 실패 — 디버깅용으로 snapshot 구조 일부 로깅.
-    keys = list(snapshot.keys())
-    meta_type = type(meta_raw).__name__
-    output_type = type(output_raw).__name__
+    # 둘 다 실패 — 이미 _parse_snapshot_payload 내부에서 raw 샘플 로깅됨.
     logger.warning(
         "snapshot payload 추출 실패 — keys=%s metadata_type=%s output_type=%s",
-        keys, meta_type, output_type,
+        list(snapshot.keys()),
+        type(snapshot.get("metadata")).__name__,
+        type(snapshot.get("output")).__name__,
     )
     return {}
 
@@ -639,7 +650,8 @@ async def on_chat_resume(thread: ThreadDict):
     저장-복원 전략은 `_save_session_snapshot` / `_extract_snapshot_payload`
     docstring 참조. 요약:
       - 저장: Step.metadata + Step.output 동시 기록
-      - 복원: metadata 우선 시도 → 실패 시 output JSON 파싱 fallback
+      - 복원: metadata → output 순서로 시도, 각 필드는 JSON → ast.literal_eval
+        다중 포맷 파싱
 
     복원 실패 시 (snapshot 없음 / payload 파싱 실패 / chunks 파일 소실):
       - user_session은 on_chat_start와 동일하게 초기화
@@ -649,8 +661,7 @@ async def on_chat_resume(thread: ThreadDict):
       ✅ 추천 질문 버튼 (`cl.Action`) — 2.10.1이 resume 시 버튼을 살려내지
          못해 재전송 필수. generate_follow_ups는 ~2-3초 LLM 호출이라 부담 경미.
       ❌ 차트(cl.Plotly) — figure 직렬화가 blob_storage(#73) 미설정으로 실패.
-         chart_spec에서 재생성은 가능하지만 메시지 히스토리 끝에 달라붙어
-         순서 어색 + 추가 3-5초 부담. 완전 복원은 #73 도입 후.
+         이번 범위에서 제외 (사용자 결정 — 필요도 낮음).
       ❌ 원본 PDF 열기 버튼 — 서버 임시 경로 소실. 버튼 만들면 "PDF 없음"
          에러만 떠 혼란 유발 → 렌더링 안 함.
 
@@ -667,7 +678,6 @@ async def on_chat_resume(thread: ThreadDict):
     await _build_chat_settings()
 
     # 디버그: thread["steps"]에서 snapshot 관련 step 구조 덤프 (문제 진단용).
-    # 정상 동작 확인 후 한 단계 내려가거나 제거 가능.
     steps = thread.get("steps") or []
     snapshot_like = [s for s in steps if s.get("name", "").endswith("session_snapshot")]
     logger.info(
