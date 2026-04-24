@@ -316,17 +316,53 @@ async def _stream_by_lines(msg: cl.Message, text: str) -> None:
 def _build_follow_ups(summary: SummaryResult | None) -> list[cl.Action]:
     """추천 질문을 cl.Action 버튼 리스트로 구성.
 
-    #70에서 SQLAlchemyDataLayer로 전환되면서 HybridDataLayer 시절의
-    action_callback → on_chat_start 재트리거 버그가 재현되지 않는지 재검증 중.
+    generate_follow_ups는 LLM 호출이라 ~2-3초 걸리고 매번 결과가 달라짐.
+    매 Q&A마다 재호출하면 부담 + 질문이 매번 바뀌어 사용자 혼란.
+
+    캐싱 전략:
+      - 처음 호출 시 생성 결과를 user_session["followup_questions"]에 저장
+        (plain list of str — cl.Action은 persist 안 됨)
+      - 이후 호출에서는 캐시된 질문들로 cl.Action만 새로 만듦
+
+    캐시 무효화:
+      - on_chat_start / on_chat_resume 진입 시 세션 초기화로 자동 클리어
+      - 새 문서 업로드 시 (새 summary) on_message 핸들러에서 덮어씀
     """
     if not summary:
-        defaults = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
-        return [cl.Action(name="followup", payload={"value": q}, label=q) for q in defaults]
+        cached = cl.user_session.get("followup_questions") or []
+        if not cached:
+            cached = ["재무지표 더 자세히 보여줘", "리스크 요인은 무엇인가요?", "향후 전망은?"]
+            cl.user_session.set("followup_questions", cached)
+        return [cl.Action(name="followup", payload={"value": q}, label=q) for q in cached]
+
+    cached = cl.user_session.get("followup_questions")
+    if cached:
+        return [cl.Action(name="followup", payload={"value": q}, label=q) for q in cached]
+
+    # 신규 생성 (LLM 호출)
     follow_ups = generate_follow_ups(summary)
-    return [
-        cl.Action(name="followup", payload={"value": fu.question}, label=fu.question)
-        for fu in follow_ups
-    ]
+    questions = [fu.question for fu in follow_ups]
+    cl.user_session.set("followup_questions", questions)
+    return [cl.Action(name="followup", payload={"value": q}, label=q) for q in questions]
+
+
+async def _resend_follow_ups() -> None:
+    """추천 질문 버튼을 새 메시지로 재전송 (Q&A 후 매번 호출).
+
+    Chainlit 동작상 한 번 클릭된 `cl.Action`이 포함된 메시지는 이후 히스토리
+    스크롤에서 잘 안 보이거나 버튼이 비활성화된 것처럼 보여, 매 Q&A 후 새
+    메시지로 다시 보내야 사용자가 계속 클릭 가능.
+
+    `_build_follow_ups`가 내부 캐시를 쓰므로 LLM 추가 호출 없이 즉시 완료.
+    """
+    summary = _to_summary_result(cl.user_session.get("result"))
+    if not summary:
+        return
+    try:
+        actions = _build_follow_ups(summary)
+        await cl.Message(content="💬 **이런 것도 물어보세요**", actions=actions).send()
+    except Exception as e:
+        logger.warning("추천 질문 재전송 실패: %s", e)
 
 
 async def _send_qa_answer(qa_result) -> None:
@@ -373,9 +409,21 @@ async def _send_qa_answer(qa_result) -> None:
 
 
 async def _send_chart(section_label: str, fig) -> None:
+    """차트 메시지 전송.
+
+    content는 빈 문자열로 유지 — 섹션 라벨은 Plotly element의 name 속성으로
+    넘겨 Plotly 위젯 안쪽 타이틀로 표시. 이유:
+      - resume 시 figure 직렬화가 blob_storage(#73) 없이 실패하면서 Plotly
+        element는 사라지고 텍스트 content(`📊 **섹션명**`)만 남아 "자질구레한
+        빈 라벨"이 잔해로 남음.
+      - content를 빈 문자열로 두면 element 살아있을 땐 정상 표시, 소실 시
+        빈 메시지가 최소 높이로 축소 → 시각적 노이즈 최소화.
+      - public/stylesheet.css [4]의 규칙이 빈 content 메시지를 더 공격적으로
+        숨기도록 보조.
+    """
     await asyncio.wait_for(
         cl.Message(
-            content=f"📊 **{section_label}**",
+            content="",
             elements=[cl.Plotly(name=section_label, figure=fig, display="inline", size=CHART_SIZE)],
         ).send(),
         timeout=CHART_SEND_TIMEOUT,
@@ -597,6 +645,10 @@ async def _run_qa(question: str) -> None:
     #108: ask()에 on_stage 콜백을 전달해 검색/재정렬/답변 3구간을 cl.Step으로
     가시화. reranker cold start(최대 1분+) 구간에서 "응답 없음" 체감 제거.
     Step은 답변 메시지 안에 접힌 형태로 붙고, 펼치면 각 구간 경과시간 확인.
+
+    답변 완료 후에는 추천 질문을 다시 노출 — 사용자가 계속 다른 질문을
+    클릭할 수 있도록. `_resend_follow_ups`는 세션 캐시를 써서 LLM 추가 호출
+    없이 수행.
     """
     result     = cl.user_session.get("result")
     summary    = _to_summary_result(result)
@@ -624,6 +676,9 @@ async def _run_qa(question: str) -> None:
     )
     await _send_qa_answer(qa_result)
 
+    # 답변 후 추천 질문 재노출 (사용자가 계속 다른 질문을 클릭할 수 있게).
+    await _resend_follow_ups()
+
 
 @cl.on_chat_start
 async def on_chat_start():
@@ -631,6 +686,7 @@ async def on_chat_start():
     cl.user_session.set("raw_chunks", [])
     cl.user_session.set("doc_id", None)
     cl.user_session.set("pdf_path", None)
+    cl.user_session.set("followup_questions", None)
     # 사이드바 열림 상태 — open_pdf 액션이 토글 기준으로 삼는다 (#117 C3)
     cl.user_session.set("pdf_sidebar_open", False)
     await _build_chat_settings()
@@ -655,7 +711,8 @@ async def on_chat_resume(thread: ThreadDict):
       ✅ 추천 질문 버튼 (`cl.Action`) — 2.10.1이 resume 시 버튼을 살려내지
          못해 재전송 필수. generate_follow_ups는 ~2-3초 LLM 호출이라 부담 경미.
       ❌ 차트(cl.Plotly) — figure 직렬화가 blob_storage(#73) 미설정으로 실패.
-         이번 범위에서 제외 (사용자 결정 — 필요도 낮음).
+         이번 범위에서 제외 (사용자 결정). `_send_chart`의 content를 빈
+         문자열로 둬서 소실 시 잔해 최소화.
       ❌ 원본 PDF 열기 버튼 — 서버 임시 경로 소실. 버튼 만들면 "PDF 없음"
          에러만 떠 혼란 유발 → 렌더링 안 함.
 
@@ -667,6 +724,7 @@ async def on_chat_resume(thread: ThreadDict):
     cl.user_session.set("doc_id", None)
     cl.user_session.set("pdf_path", None)
     cl.user_session.set("pdf_sidebar_open", False)
+    cl.user_session.set("followup_questions", None)
 
     # ChatSettings 재설정 (Chainlit #1391 워크어라운드) — snapshot 유무와 무관하게 필요.
     await _build_chat_settings()
@@ -839,6 +897,8 @@ async def on_message(message: cl.Message):
         cl.user_session.set("result", step3)
         cl.user_session.set("raw_chunks", raw_chunks)
         cl.user_session.set("doc_id", doc_id)
+        # 새 문서 업로드 → 이전 follow-up 캐시 무효화 (신규 summary 기반 재생성)
+        cl.user_session.set("followup_questions", None)
         if tmp_path.suffix.lower() == ".pdf":
             cl.user_session.set("pdf_path", str(tmp_path))
         else:
