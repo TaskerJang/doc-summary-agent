@@ -4,6 +4,7 @@ Chainlit UI 진입점 — ChatGPT 스타일
 파일 업로드 → TaskList 진행 표시 → 전체 요약 → 섹션별 차트(cl.Plotly) → 추천 질문 버튼 + PDF 열기 → Q&A
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import chainlit as cl
 from chainlit.input_widget import Slider, Switch
+from chainlit.types import ThreadDict
 
 from main import run_step1, run_step2, run_step3
 from summarizer.llm import SummaryResult, SectionSummary
@@ -27,6 +29,12 @@ PDF_SEND_TIMEOUT = 5
 
 _APP_USERNAME = os.getenv("APP_USERNAME", "admin")
 _APP_PASSWORD = os.getenv("APP_PASSWORD", "1234!")
+
+# ── #99 Chat Resume — 세션 상태 스냅샷 ────────────────────────────
+# raw_chunks는 크기가 커서 step metadata에 넣으면 DB row가 비대해지므로
+# doc_id 기반 별도 JSON 파일로 분리 저장. snapshot step은 경량 포인터만 보유.
+_SNAPSHOT_STEP_NAME = "_session_snapshot"
+_CHUNKS_STORAGE_DIR = Path(os.getenv("CHUNKS_STORAGE_DIR", "/tmp/doc-summary-agent/chunks"))
 
 
 @cl.password_auth_callback
@@ -67,6 +75,105 @@ def _fmt(value, suffix: str = "") -> str:
     if value is None:
         return "-"
     return f"{value}{suffix}"
+
+
+def _safe_doc_id(doc_id: str) -> str:
+    """파일 시스템 안전한 doc_id slug (경로 구분자·유니코드 파일명 대응).
+
+    doc_id는 원본 파일명을 그대로 쓰므로 공백·한글·특수문자가 포함될 수 있다.
+    `/tmp/doc-summary-agent/chunks/` 아래 파일로 저장할 때는 안전한 슬러그만 남김.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", doc_id).strip("_") or "doc"
+
+
+def _chunks_file_path(doc_id: str) -> Path:
+    return _CHUNKS_STORAGE_DIR / f"chunks_{_safe_doc_id(doc_id)}.json"
+
+
+def _save_chunks_to_disk(doc_id: str, raw_chunks: list[str]) -> Path | None:
+    """raw_chunks를 /tmp 기반 JSON 파일로 영속화 (#99).
+
+    snapshot step metadata에 chunks 전체를 넣으면 SQLite row 크기가 비대해져
+    `list_threads` 쿼리가 느려진다. doc_id 기준 별도 파일에 저장하고 step에는
+    경로만 보관.
+
+    반환: 저장 성공 시 Path, 실패 시 None.
+    """
+    try:
+        _CHUNKS_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _chunks_file_path(doc_id)
+        path.write_text(json.dumps(raw_chunks, ensure_ascii=False), encoding="utf-8")
+        logger.info("raw_chunks 디스크 저장: doc_id=%s chunks=%d path=%s",
+                    doc_id, len(raw_chunks), path)
+        return path
+    except Exception as e:
+        logger.warning("raw_chunks 디스크 저장 실패: doc_id=%s err=%s", doc_id, e)
+        return None
+
+
+def _load_chunks_from_disk(path_str: str) -> list[str]:
+    """snapshot이 가리키는 chunks 파일을 로드 (#99).
+
+    서버 재시작·/tmp 청소 등으로 파일이 소실됐을 수 있으므로 실패 시 빈
+    리스트 반환. 호출 측에서 Q&A 불가 상태로 graceful degrade.
+    """
+    if not path_str:
+        return []
+    try:
+        path = Path(path_str)
+        if not path.exists():
+            logger.warning("raw_chunks 파일 소실: %s", path_str)
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [str(x) for x in data]
+        logger.warning("raw_chunks 파일 형식 오류 (list 아님): %s", path_str)
+        return []
+    except Exception as e:
+        logger.warning("raw_chunks 파일 로드 실패: path=%s err=%s", path_str, e)
+        return []
+
+
+async def _save_session_snapshot(
+    doc_id: str,
+    summary_dict: dict,
+    chunks_path: Path | None,
+) -> None:
+    """현재 세션 상태를 thread에 숨겨진 Step으로 기록 (#99).
+
+    `on_chat_resume`는 thread["steps"]에서 이 step을 찾아 metadata에서 역복원.
+    name은 내부 상수(_SNAPSHOT_STEP_NAME)로 고정해 resume 시 필터링.
+
+    UI 노출을 막기 위해 cot="full" 설정에서도 튀지 않도록 input/output 비움.
+    실제로 Chainlit Step UI는 빈 input/output을 1줄로 접어서 표시하므로
+    사용자에게는 거의 보이지 않는다.
+    """
+    try:
+        async with cl.Step(name=_SNAPSHOT_STEP_NAME, type="tool", show_input=False) as snap:
+            snap.input = ""
+            snap.output = ""
+            snap.metadata = {
+                "doc_id": doc_id,
+                "summary": summary_dict,
+                "chunks_path": str(chunks_path) if chunks_path else "",
+            }
+        logger.info("세션 스냅샷 저장 완료: doc_id=%s", doc_id)
+    except Exception as e:
+        # 스냅샷 저장 실패는 resume만 불가능하게 만들 뿐 현재 세션 Q&A에는 영향 없음.
+        logger.warning("세션 스냅샷 저장 실패: doc_id=%s err=%s", doc_id, e)
+
+
+def _find_snapshot(thread: ThreadDict) -> dict | None:
+    """thread["steps"]에서 _session_snapshot step을 검색 (#99).
+
+    같은 thread에 여러 문서를 업로드했을 경우 여러 스냅샷이 쌓일 수 있어
+    "가장 마지막" 것을 채택 (최신 상태 우선).
+    """
+    steps = thread.get("steps") or []
+    snapshots = [s for s in steps if s.get("name") == _SNAPSHOT_STEP_NAME]
+    if not snapshots:
+        return None
+    return snapshots[-1]
 
 
 async def _stream_by_lines(msg: cl.Message, text: str) -> None:
@@ -211,8 +318,15 @@ async def _close_sidebar() -> None:
         logger.warning("PDF 사이드바 닫기 실패: %s", e)
 
 
-def _index_in_background(chunks: list[dict], doc_id: str) -> None:
-    """별도 스레드에서 인덱싱 실행 (fire-and-forget)."""
+def _index_in_background(chunks: list, doc_id: str) -> None:
+    """별도 스레드에서 인덱싱 실행 (fire-and-forget).
+
+    chunks 인자 타입:
+      - on_message 경로: list[dict] (chunker가 만든 원본 구조)
+      - on_chat_resume 경로: list[str] (raw_chunks) — summarizer.embedder가
+        dict도 str도 허용하는지 확인 필요. 문자열만 들어가도 동작하도록
+        설계되어 있다면 resume 경로는 그대로, 아니면 래핑이 필요.
+    """
     import threading
 
     def _run():
@@ -239,6 +353,25 @@ def _warmup_reranker_in_background() -> None:
             logger.warning("백그라운드 reranker 워밍업 실패: %s", e)
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+async def _build_chat_settings() -> dict:
+    """ChatSettings 위젯 생성 + 세션에 반영 (on_chat_start / on_chat_resume 공용).
+
+    Chainlit 이슈 #1391: resume 후 ChatSettings가 사라지는 버그가 있어
+    on_chat_resume에서도 동일 위젯을 다시 send해야 한다. 중복 로직을 막기 위해
+    함수로 분리.
+    """
+    settings = await cl.ChatSettings([
+        Switch(id="chart_enabled", label="차트 자동 생성",
+               description="문서 분석 후 수치 데이터를 Plotly 차트로 자동 렌더링합니다.", initial=True),
+        Slider(id="max_charts", label="최대 차트 수",
+               description="한 문서당 렌더링할 차트의 최대 개수입니다.",
+               initial=MAX_CHARTS_PER_DOC, min=1, max=10, step=1),
+    ]).send()
+    cl.user_session.set("chart_enabled", settings["chart_enabled"])
+    cl.user_session.set("max_charts", int(settings["max_charts"]))
+    return settings
 
 
 class _QaStageTracker:
@@ -351,6 +484,16 @@ async def _run_qa(question: str) -> None:
         await cl.Message(content="먼저 문서를 업로드해 주세요.").send()
         return
 
+    # resume 후 chunks 소실 케이스 — 요약은 보이지만 Q&A는 불가
+    if not raw_chunks:
+        await cl.Message(
+            content=(
+                "⚠️ 이 대화의 문서 청크 데이터가 서버에 남아있지 않아 Q&A를 실행할 수 없습니다.\n"
+                "새 대화를 시작해 문서를 다시 업로드해 주세요."
+            )
+        ).send()
+        return
+
     tracker = _QaStageTracker()
     qa_result = await ask(
         question, summary, raw_chunks, None, doc_id,
@@ -367,16 +510,80 @@ async def on_chat_start():
     cl.user_session.set("pdf_path", None)
     # 사이드바 열림 상태 — open_pdf 액션이 토글 기준으로 삼는다 (#117 C3)
     cl.user_session.set("pdf_sidebar_open", False)
-    settings = await cl.ChatSettings([
-        Switch(id="chart_enabled", label="차트 자동 생성",
-               description="문서 분석 후 수치 데이터를 Plotly 차트로 자동 렌더링합니다.", initial=True),
-        Slider(id="max_charts", label="최대 차트 수",
-               description="한 문서당 렌더링할 차트의 최대 개수입니다.",
-               initial=MAX_CHARTS_PER_DOC, min=1, max=10, step=1),
-    ]).send()
-    cl.user_session.set("chart_enabled", settings["chart_enabled"])
-    cl.user_session.set("max_charts", int(settings["max_charts"]))
+    await _build_chat_settings()
     await cl.Message(content="안녕하세요! 📄 아래 **파일 업로드 버튼**으로 문서를 업로드해 주세요.\n\nPDF · DOCX · HWP · DOC 형식을 지원합니다.").send()
+
+
+@cl.on_chat_resume
+async def on_chat_resume(thread: ThreadDict):
+    """과거 thread 클릭 시 세션 상태 복원 (#99).
+
+    목적:
+      1) 사이드바에서 과거 대화 클릭 → 요약/차트/출처가 다시 보이고 Q&A 재개 가능.
+      2) Chainlit 기본 동작은 thread["steps"]로 UI만 재구성 — user_session은 빈 상태라
+         Q&A 시 "먼저 문서를 업로드해 주세요" 메시지가 나오는 문제.
+
+    복원 대상:
+      - doc_id, raw_chunks, summary(dict)
+      - ChatSettings (chart_enabled, max_charts) — 이슈 #1391 워크어라운드
+    복원 실패 시 (snapshot 없음 / chunks 파일 소실):
+      - user_session은 on_chat_start와 동일하게 초기화
+      - Q&A 시도 시 _run_qa가 graceful degrade (안내 메시지)
+
+    재렌더링하지 않는 것:
+      - 답변 메시지 본문 · TaskList · 추천 질문 버튼 — Chainlit이 thread 히스토리로 복원
+      - 차트(cl.Plotly) — figure 직렬화가 blob_storage에 의존(이슈 #73). 대신
+        chart_spec이 summary에 있어 재생성 가능하지만, 메시지 순서가 꼬일 수 있어
+        이번 범위에서는 제외. 필요 시 후속 PR에서 on_chat_resume 전용 차트 섹션
+        재삽입으로 추가.
+      - 원본 PDF 업로드 파일 — 서버 임시 경로라 소실 확정
+    """
+    # user_session 초기화 (on_chat_start와 동일)
+    cl.user_session.set("result", None)
+    cl.user_session.set("raw_chunks", [])
+    cl.user_session.set("doc_id", None)
+    cl.user_session.set("pdf_path", None)
+    cl.user_session.set("pdf_sidebar_open", False)
+
+    # ChatSettings 재설정 (Chainlit #1391 워크어라운드) — snapshot 유무와 무관하게 필요.
+    await _build_chat_settings()
+
+    snapshot = _find_snapshot(thread)
+    if not snapshot:
+        logger.info("on_chat_resume: snapshot 없음 — thread_id=%s", thread.get("id"))
+        return
+
+    meta = snapshot.get("metadata") or {}
+    doc_id       = meta.get("doc_id") or ""
+    summary_dict = meta.get("summary") or {}
+    chunks_path  = meta.get("chunks_path") or ""
+
+    raw_chunks = _load_chunks_from_disk(chunks_path)
+
+    # user_session 역주입
+    cl.user_session.set("doc_id", doc_id)
+    cl.user_session.set("raw_chunks", raw_chunks)
+    cl.user_session.set("result", {"summary": summary_dict})
+
+    logger.info(
+        "on_chat_resume: 복원 완료 doc_id=%s chunks=%d summary_sections=%d",
+        doc_id, len(raw_chunks), len(summary_dict.get("sections", [])),
+    )
+
+    # 벡터 인덱스 재구성 — 메모리 싱글턴이라 프로세스 재시작 후엔 비어있음.
+    # chunks가 있을 때만 의미 있음.
+    if raw_chunks:
+        _index_in_background(raw_chunks, doc_id)
+        _warmup_reranker_in_background()
+    else:
+        # chunks 파일 소실 — 사용자에게 왜 Q&A가 안 되는지 미리 알림.
+        await cl.Message(
+            content=(
+                "ℹ️ 이전 대화를 불러왔습니다. 요약은 그대로 확인할 수 있지만, "
+                "서버에 원본 청크 데이터가 남아있지 않아 **추가 Q&A는 실행할 수 없습니다**.\n"
+                "Q&A를 다시 하시려면 새 대화에서 문서를 재업로드해 주세요."
+            )
+        ).send()
 
 
 @cl.on_settings_update
@@ -486,6 +693,12 @@ async def on_message(message: cl.Message):
         else:
             cl.user_session.set("pdf_path", None)
         cl.user_session.set("pdf_sidebar_open", False)
+
+        # #99 Chat Resume — 세션 상태를 thread에 스냅샷으로 영속화.
+        # raw_chunks는 별도 파일, 나머지 메타는 step metadata에 기록.
+        chunks_path = _save_chunks_to_disk(doc_id, raw_chunks)
+        await _save_session_snapshot(doc_id, summary_dict, chunks_path)
+
         summary = _to_summary_result(step3)
 
         # 전체 요약
