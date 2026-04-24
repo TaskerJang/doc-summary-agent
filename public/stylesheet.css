@@ -141,3 +141,34 @@ div:has(> div > div > button#step-_session_snapshot) {
 [data-radix-collection-item]:has(button#step-_session_snapshot) {
     display: none !important;
 }
+
+/*
+ * ──────────────────────────────────────────────────────────────
+ * [4] 차트 메시지 잔해 정리 (#99 follow-up)
+ * ──────────────────────────────────────────────────────────────
+ * 배경: `_send_chart`가 보낸 차트 메시지는 resume 시 Plotly figure가
+ *       blob_storage(#73) 미설정으로 소실되면서 **content가 빈 assistant
+ *       메시지**만 남는다. ui/app.py의 `_send_chart`에서 content를 빈
+ *       문자열로 설정해 잔해 자체는 최소화했지만, 빈 메시지 박스가
+ *       여전히 공간을 차지하므로 CSS로 한 번 더 축소.
+ *
+ * 전략:
+ *   assistant가 보낸 메시지 중 "본문 텍스트도 없고 element도 없는" 것을
+ *   높이 최소화 + margin 제거해서 거의 안 보이게. 완전히 display:none은
+ *   위험 — 다른 정상 케이스(예: 스트리밍 시작 직전의 빈 메시지)에서
+ *   레이아웃을 망칠 수 있음. 보조 정리로 접근.
+ *
+ * 실측 DOM (Chainlit 2.10.1):
+ *   div.step  ← assistant 메시지 컨테이너
+ *     └ div.message-content
+ *         └ [비어있거나 특정 요소들]
+ *
+ * 주의:
+ *   현재 이 규칙은 발견된 DOM 기반 방어적 접근이며, Chainlit 업스트림
+ *   구조 변경 시 재조정 필요. 실질적 제거는 blob_storage 설정으로 차트
+ *   자체를 복원하는 것이 근본 해결 (#73).
+ */
+
+/* 차트 잔해 최소화 규칙은 브라우저 호환/정확도 이슈로 잠시 보류.
+   ui/app.py의 `_send_chart` content 비움만으로 충분한지 확인 후 추가 예정. */
+
