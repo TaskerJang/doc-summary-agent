@@ -2,6 +2,9 @@
  * public/stylesheet.css
  * Chainlit 커스텀 스타일시트 — 자동 로드됨 (uv run chainlit run 시)
  *
+ * ──────────────────────────────────────────────────────────────
+ * [1] Plotly 인라인 차트 높이 수정
+ * ──────────────────────────────────────────────────────────────
  * 문제: Chainlit InlinedPlotlyList.tsx가 인라인 차트 컨테이너에
  *       style="max-width: fit-content; height: 400px;" 를 하드코딩.
  *       (Issue #1919, 미수정)
@@ -28,4 +31,79 @@
     height: auto !important;
     max-height: 350px !important;
     min-height: 180px !important;
+}
+
+/*
+ * ──────────────────────────────────────────────────────────────
+ * [2] 사이드바 "스레드 없음" 빈 상태 UI — Claude.ai 스타일
+ * ──────────────────────────────────────────────────────────────
+ * 문제: Chainlit 2.10.1 기본 UI는 사이드바에 스레드 히스토리가 없을 때
+ *       파란색 MUI Info Alert로 "스레드를 찾을 수 없습니다"를 표시.
+ *       - 파란 배경 + 아이콘이 "에러/경고"처럼 느껴져 첫인상이 무거움
+ *       - 사이드바의 미니멀 톤과 톤앤매너 불일치
+ *       - #69/#70 SQLite 히스토리 도입 이후 신규 세션마다 매번 노출
+ *
+ * 해결: 사이드바 범위에 한정된 Info Alert만 톤다운.
+ *       본문 영역의 Info 알림(설정 안내 등)은 그대로 둠.
+ *       - 파란 배경/테두리 제거 → 투명 배경
+ *       - 중앙 정렬 + 세로 배치로 여백감 확보
+ *       - 아이콘/텍스트 회색 톤 + 작게 → "시작해볼까요" 초대 느낌
+ *
+ * 범위 제한:
+ *   aside 내부의 standardInfo / colorInfo Alert만 타겟팅.
+ *   MUI 버전 차이를 대비해 두 클래스 변형 모두 커버.
+ *
+ * 유지보수 노트:
+ *   Chainlit 업스트림 변경 시 aside 대신 다른 컨테이너를 쓰게 되면
+ *   브라우저 devtools → Elements에서 "스레드를 찾을 수 없습니다" 박스를
+ *   검사해 상위 컨테이너 셀렉터만 교체하면 됨.
+ */
+
+/* 사이드바 내부 Info Alert 컨테이너 톤다운 */
+aside [role="alert"].MuiAlert-standardInfo,
+aside [role="alert"].MuiAlert-colorInfo {
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 24px 16px !important;
+    margin: 8px !important;
+    border-radius: 8px !important;
+
+    /* 중앙 정렬 + 세로 배치 */
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    text-align: center !important;
+}
+
+/* 아이콘 — 회색 + 작게, 살짝 투명 */
+aside [role="alert"].MuiAlert-standardInfo .MuiAlert-icon,
+aside [role="alert"].MuiAlert-colorInfo .MuiAlert-icon {
+    color: #9ca3af !important;
+    opacity: 0.55 !important;
+    margin: 0 0 4px 0 !important;
+    padding: 0 !important;
+    font-size: 20px !important;
+}
+
+/* 메시지 — 회색 톤 + 작은 글씨 + 살짝 자간 여유 */
+aside [role="alert"].MuiAlert-standardInfo .MuiAlert-message,
+aside [role="alert"].MuiAlert-colorInfo .MuiAlert-message {
+    color: #9ca3af !important;
+    font-size: 12px !important;
+    line-height: 1.5 !important;
+    padding: 0 !important;
+    letter-spacing: 0.01em !important;
+}
+
+/* 다크모드 대응 — 더 옅은 회색으로 */
+@media (prefers-color-scheme: dark) {
+    aside [role="alert"].MuiAlert-standardInfo .MuiAlert-icon,
+    aside [role="alert"].MuiAlert-colorInfo .MuiAlert-icon,
+    aside [role="alert"].MuiAlert-standardInfo .MuiAlert-message,
+    aside [role="alert"].MuiAlert-colorInfo .MuiAlert-message {
+        color: #6b7280 !important;
+    }
 }
