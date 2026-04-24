@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -32,14 +33,24 @@ _APP_USERNAME = os.getenv("APP_USERNAME", "admin")
 _APP_PASSWORD = os.getenv("APP_PASSWORD", "1234!")
 
 # ── #99 Chat Resume — 세션 상태 스냅샷 ────────────────────────────
-# raw_chunks는 크기가 커서 step metadata에 넣으면 DB row가 비대해지므로
-# doc_id 기반 별도 JSON 파일로 분리 저장. snapshot step은 경량 포인터만 보유.
+# 저장 전략: Step name은 `_session_snapshot` 고정. metadata는 Chainlit
+# SQLAlchemyDataLayer가 JSON 문자열로 저장하는데, thread["steps"]로 불러올 때
+# 역직렬화 여부가 버전에 따라 다르다. 최악의 경우 metadata 필드가 아예 빠지는
+# 것도 확인 — 그래서 백업으로 `output` 필드에도 같은 JSON을 넣는다 (output은
+# 확실히 persist/restore됨, 일반 Step 사용 사례와 동일).
 #
-# Step name은 앞에 점(.)을 붙여 Chainlit 2.10.1 기본 UI에서 "시스템 내부 step"
-# 으로 인식되도록 유도 (실제 필터링은 프런트 쪽 처리라 100% 숨김은 아니지만
-# avatar/라벨 노출을 최소화). type="undefined"는 아바타를 안 붙인다.
-_SNAPSHOT_STEP_NAME = ".session_snapshot"
-_CHUNKS_STORAGE_DIR = Path(os.getenv("CHUNKS_STORAGE_DIR", "/tmp/doc-summary-agent/chunks"))
+# UI 노출 최소화:
+#   - name 앞 "." 접두사는 2.10.1에서 실질적 필터링 효과 없음 (확인됨).
+#     대신 public/stylesheet.css에서 CSS 규칙으로 해당 step의 메시지 행을
+#     `display: none`으로 숨긴다.
+_SNAPSHOT_STEP_NAME = "_session_snapshot"
+
+# 크로스 플랫폼 임시 저장 경로. Windows에서도 tempfile.gettempdir()은
+# %TEMP%를 올바르게 반환해 `/tmp` 하드코딩보다 안전.
+_CHUNKS_STORAGE_DIR = Path(
+    os.getenv("CHUNKS_STORAGE_DIR")
+    or (Path(tempfile.gettempdir()) / "doc-summary-agent" / "chunks")
+)
 
 
 @cl.password_auth_callback
@@ -83,12 +94,27 @@ def _fmt(value, suffix: str = "") -> str:
 
 
 def _safe_doc_id(doc_id: str) -> str:
-    """파일 시스템 안전한 doc_id slug (경로 구분자·유니코드 파일명 대응).
+    """파일 시스템 안전한 doc_id slug.
 
-    doc_id는 원본 파일명을 그대로 쓰므로 공백·한글·특수문자가 포함될 수 있다.
-    `/tmp/doc-summary-agent/chunks/` 아래 파일로 저장할 때는 안전한 슬러그만 남김.
+    이전 버전은 `[^A-Za-z0-9._-]` 외 문자를 모두 `_`로 치환해 한글 파일명이
+    전부 `.pdf` 같은 짧은 slug로 축약되어 다른 문서끼리 충돌했다
+    (예: "한화_리포트.pdf", "삼성_리포트.pdf" → 둘 다 ".pdf").
+
+    개선:
+      - 파일시스템 금지 문자만 제거 (Windows: `<>:"/\\|?*`, 제어문자).
+        한글/영숫자는 그대로 보존.
+      - doc_id 전체 해시(MD5 8자)를 suffix로 붙여 동일 파일명도 구분.
+        → "한화_리포트.pdf_a3f29b12", "삼성_리포트.pdf_c8e17d45"
     """
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", doc_id).strip("_") or "doc"
+    import hashlib
+    # 파일시스템 금지 문자 + 제어문자만 `_`로 치환.
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", doc_id)
+    cleaned = cleaned.strip("_ ").strip() or "doc"
+    # 길이 제한 (Windows 파일명 MAX_PATH 260 고려, 여유 있게 120자).
+    if len(cleaned) > 120:
+        cleaned = cleaned[:120]
+    digest = hashlib.md5(doc_id.encode("utf-8")).hexdigest()[:8]
+    return f"{cleaned}_{digest}"
 
 
 def _chunks_file_path(doc_id: str) -> Path:
@@ -96,7 +122,7 @@ def _chunks_file_path(doc_id: str) -> Path:
 
 
 def _save_chunks_to_disk(doc_id: str, raw_chunks: list[str]) -> Path | None:
-    """raw_chunks를 /tmp 기반 JSON 파일로 영속화 (#99).
+    """raw_chunks를 임시 디렉토리 JSON 파일로 영속화 (#99).
 
     snapshot step metadata에 chunks 전체를 넣으면 SQLite row 크기가 비대해져
     `list_threads` 쿼리가 느려진다. doc_id 기준 별도 파일에 저장하고 step에는
@@ -119,8 +145,8 @@ def _save_chunks_to_disk(doc_id: str, raw_chunks: list[str]) -> Path | None:
 def _load_chunks_from_disk(path_str: str) -> list[str]:
     """snapshot이 가리키는 chunks 파일을 로드 (#99).
 
-    서버 재시작·/tmp 청소 등으로 파일이 소실됐을 수 있으므로 실패 시 빈
-    리스트 반환. 호출 측에서 Q&A 불가 상태로 graceful degrade.
+    서버 재시작·임시 디렉토리 청소 등으로 파일이 소실됐을 수 있으므로 실패 시
+    빈 리스트 반환. 호출 측에서 Q&A 불가 상태로 graceful degrade.
     """
     if not path_str:
         return []
@@ -139,46 +165,35 @@ def _load_chunks_from_disk(path_str: str) -> list[str]:
         return []
 
 
-def _parse_snapshot_meta(raw_meta: Any) -> dict:
-    """snapshot step의 metadata를 dict로 보장 (#99 버그 수정).
+def _parse_snapshot_payload(raw: Any) -> dict:
+    """snapshot step의 payload(metadata 또는 output)를 dict로 보장 (#99).
 
-    SQLAlchemyDataLayer는 step metadata를 DB에 JSON 문자열로 저장하는데,
-    `get_thread` 응답에서는 dict로 역직렬화되지 않고 **문자열 그대로** 반환된다
-    (Chainlit 2.10.1 확인). 그래서 on_chat_resume에서 `meta.get("doc_id")`를
-    호출하면 `AttributeError: 'str' object has no attribute 'get'` 발생.
+    Chainlit 2.10.1 SQLAlchemyDataLayer의 get_thread 응답:
+      - step.metadata: DB에 JSON 문자열로 저장되지만 복원 시 필드가 누락되는
+        경우가 관찰됨 (로그: metadata=None → doc_id='' chunks=0).
+      - step.output: 일반 Step 기능으로 확실히 persist + 복원 O.
 
-    이 헬퍼는 세 가지 입력 모두 안전하게 dict로 정규화:
-      - dict: 그대로 반환
-      - str (JSON): json.loads로 파싱
-      - 기타/None/파싱 실패: 빈 dict 반환 + 경고 로그
+    그래서 저장 시 둘 다 쓰고, 복원 시 metadata 먼저 시도 → 실패 시 output.
+    이 헬퍼는 둘 중 어느 쪽을 넘겨도 안전하게 dict 정규화.
     """
-    if isinstance(raw_meta, dict):
-        return raw_meta
-    if isinstance(raw_meta, str):
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
         try:
-            parsed = json.loads(raw_meta)
+            parsed = json.loads(raw)
             if isinstance(parsed, dict):
                 return parsed
-            logger.warning("snapshot metadata JSON이 dict 아님: type=%s", type(parsed).__name__)
-            return {}
-        except Exception as e:
-            logger.warning("snapshot metadata JSON 파싱 실패: err=%s raw=%r",
-                           e, (raw_meta[:120] + "...") if len(raw_meta) > 120 else raw_meta)
-            return {}
-    logger.warning("snapshot metadata 형식 미지원: type=%s", type(raw_meta).__name__)
+        except Exception:
+            pass
     return {}
 
 
 def _wrap_str_chunks_for_index(raw_chunks: list[str]) -> list[dict]:
-    """list[str] → list[dict] 래핑 (#99 버그 수정).
+    """list[str] → list[dict] 래핑 (#99).
 
     summarizer.embedder.index_chunks는 `chunk["text"]`를 요구해 dict 형식
-    필수. on_message 원 경로에서는 chunker의 list[dict]를 그대로 인덱싱에
-    넘겼지만, on_chat_resume에서는 raw_chunks(list[str])를 복원하므로
-    `c["text"]` 접근에서 `'str' object has no attribute 'get'` 에러 발생.
-
-    resume 경로는 원본 chunker 메타(chunk_index, section)를 잃은 상태라
-    최소 필드만 재구성 — 인덱싱 기능엔 영향 없음 (임베딩 대상은 text).
+    필수. on_chat_resume에서 raw_chunks(list[str])를 복원하므로 인덱싱 직전에
+    최소 필드만 재구성.
     """
     wrapped = []
     for i, text in enumerate(raw_chunks):
@@ -197,33 +212,33 @@ async def _save_session_snapshot(
     summary_dict: dict,
     chunks_path: Path | None,
 ) -> None:
-    """현재 세션 상태를 thread에 숨겨진 Step으로 기록 (#99).
+    """세션 상태를 thread에 Step으로 저장 (#99).
 
-    `on_chat_resume`는 thread["steps"]에서 이 step을 찾아 metadata에서 역복원.
-    name은 내부 상수(_SNAPSHOT_STEP_NAME)로 고정해 resume 시 필터링.
+    저장 내용을 metadata와 output 두 곳에 동시에 기록:
+      - metadata: 원래 의도된 경로. 하지만 Chainlit 2.10.1에서 restore
+        누락이 관찰됨.
+      - output: 일반 Step 기능으로 확실히 persist. JSON 문자열로 인코딩.
 
-    UI 노출 최소화 전략:
-      - name 앞에 "." 접두사 — 일부 Chainlit 필터가 시스템 step으로 인식
-      - type="undefined" — 아바타 미생성
-      - input/output 비움 — content 영역 최소화
-      - show_input=False — input 영역 접기
-    그럼에도 Chainlit 2.10.1 UI는 이 step을 완전히 숨기지는 않는다(프런트
-    필터 범위 밖). 최악의 경우 짧은 구분선 하나 정도로 표시되어 기존
-    파란 Alert보다는 훨씬 덜 거슬림.
+    on_chat_resume는 metadata 먼저 시도 → 비면 output 파싱으로 fallback.
     """
     try:
+        payload = {
+            "doc_id": doc_id,
+            "summary": summary_dict,
+            "chunks_path": str(chunks_path) if chunks_path else "",
+        }
+        payload_json = json.dumps(payload, ensure_ascii=False)
+
         async with cl.Step(
             name=_SNAPSHOT_STEP_NAME,
             type="undefined",
             show_input=False,
         ) as snap:
             snap.input = ""
-            snap.output = ""
-            snap.metadata = {
-                "doc_id": doc_id,
-                "summary": summary_dict,
-                "chunks_path": str(chunks_path) if chunks_path else "",
-            }
+            # output에 JSON 문자열을 직접 기록. CSS로 UI에 안 보이게 숨김.
+            snap.output = payload_json
+            # metadata에도 dict 형태로 저장 (Chainlit이 dict→JSON으로 직렬화).
+            snap.metadata = payload
         logger.info("세션 스냅샷 저장 완료: doc_id=%s", doc_id)
     except Exception as e:
         # 스냅샷 저장 실패는 resume만 불가능하게 만들 뿐 현재 세션 Q&A에는 영향 없음.
@@ -234,17 +249,50 @@ def _find_snapshot(thread: ThreadDict) -> dict | None:
     """thread["steps"]에서 snapshot step을 검색 (#99).
 
     같은 thread에 여러 문서를 업로드했을 경우 여러 스냅샷이 쌓일 수 있어
-    "가장 마지막" 것을 채택 (최신 상태 우선).
+    "가장 마지막" 것을 채택.
 
-    구 이름(`_session_snapshot`)으로 저장된 기존 thread와의 하위 호환을
-    위해 두 이름 모두 허용 — 필터링 후 있으면 그대로 사용.
+    이전 버전에서 저장된 `.session_snapshot` 이름도 하위 호환 허용.
     """
     steps = thread.get("steps") or []
-    valid_names = {_SNAPSHOT_STEP_NAME, "_session_snapshot"}
+    valid_names = {_SNAPSHOT_STEP_NAME, ".session_snapshot"}
     snapshots = [s for s in steps if s.get("name") in valid_names]
     if not snapshots:
         return None
     return snapshots[-1]
+
+
+def _extract_snapshot_payload(snapshot: dict) -> dict:
+    """snapshot step에서 payload 추출 — metadata 우선, output fallback (#99).
+
+    Chainlit 2.10.1에서 step.metadata가 복원 시 None으로 오는 케이스가 있어
+    output 필드에 JSON 백업을 둔 구조. 이 헬퍼가 두 경로를 순서대로 시도.
+
+    디버그 로그: snapshot 구조에서 어느 필드가 살아있는지 기록해 업스트림
+    버전 차이 파악에 활용.
+    """
+    # 1차: metadata (의도된 경로)
+    meta_raw = snapshot.get("metadata")
+    payload = _parse_snapshot_payload(meta_raw)
+    if payload:
+        logger.debug("snapshot payload: metadata 경로 성공")
+        return payload
+
+    # 2차: output (fallback)
+    output_raw = snapshot.get("output")
+    payload = _parse_snapshot_payload(output_raw)
+    if payload:
+        logger.info("snapshot payload: output fallback 사용 (metadata 복원 실패)")
+        return payload
+
+    # 둘 다 실패 — 디버깅용으로 snapshot 구조 일부 로깅.
+    keys = list(snapshot.keys())
+    meta_type = type(meta_raw).__name__
+    output_type = type(output_raw).__name__
+    logger.warning(
+        "snapshot payload 추출 실패 — keys=%s metadata_type=%s output_type=%s",
+        keys, meta_type, output_type,
+    )
+    return {}
 
 
 async def _stream_by_lines(msg: cl.Message, text: str) -> None:
@@ -588,31 +636,19 @@ async def on_chat_start():
 async def on_chat_resume(thread: ThreadDict):
     """과거 thread 클릭 시 세션 상태 복원 (#99).
 
-    목적:
-      1) 사이드바에서 과거 대화 클릭 → 요약/차트/출처가 다시 보이고 Q&A 재개 가능.
-      2) Chainlit 기본 동작은 thread["steps"]로 UI만 재구성 — user_session은 빈 상태라
-         Q&A 시 "먼저 문서를 업로드해 주세요" 메시지가 나오는 문제.
+    저장-복원 전략은 `_save_session_snapshot` / `_extract_snapshot_payload`
+    docstring 참조. 요약:
+      - 저장: Step.metadata + Step.output 동시 기록
+      - 복원: metadata 우선 시도 → 실패 시 output JSON 파싱 fallback
 
-    복원 대상:
-      - doc_id, raw_chunks, summary(dict)
-      - ChatSettings (chart_enabled, max_charts) — 이슈 #1391 워크어라운드
-    복원 실패 시 (snapshot 없음 / chunks 파일 소실):
+    복원 실패 시 (snapshot 없음 / payload 파싱 실패 / chunks 파일 소실):
       - user_session은 on_chat_start와 동일하게 초기화
       - Q&A 시도 시 _run_qa가 graceful degrade (안내 메시지)
 
     재렌더링하지 않는 것:
       - 답변 메시지 본문 · TaskList · 추천 질문 버튼 — Chainlit이 thread 히스토리로 복원
-      - 차트(cl.Plotly) — figure 직렬화가 blob_storage에 의존(이슈 #73). 대신
-        chart_spec이 summary에 있어 재생성 가능하지만, 메시지 순서가 꼬일 수 있어
-        이번 범위에서는 제외. 필요 시 후속 PR에서 on_chat_resume 전용 차트 섹션
-        재삽입으로 추가.
+      - 차트(cl.Plotly) — figure 직렬화가 blob_storage에 의존(이슈 #73)
       - 원본 PDF 업로드 파일 — 서버 임시 경로라 소실 확정
-
-    버그 수정 이력:
-      - step metadata가 str(JSON)로 들어오는 케이스 → `_parse_snapshot_meta`로
-        dict 정규화. SQLAlchemyDataLayer 역직렬화 안 되는 이슈 우회.
-      - _index_in_background에 list[str] 전달 시 AttributeError → 인덱싱
-        직전에 `_wrap_str_chunks_for_index`로 list[dict]로 래핑.
     """
     # user_session 초기화 (on_chat_start와 동일)
     cl.user_session.set("result", None)
@@ -624,16 +660,36 @@ async def on_chat_resume(thread: ThreadDict):
     # ChatSettings 재설정 (Chainlit #1391 워크어라운드) — snapshot 유무와 무관하게 필요.
     await _build_chat_settings()
 
+    # 디버그: thread["steps"]에서 snapshot 관련 step 구조 덤프 (문제 진단용).
+    # 정상 동작 확인 후 한 단계 내려가거나 제거 가능.
+    steps = thread.get("steps") or []
+    snapshot_like = [s for s in steps if s.get("name", "").endswith("session_snapshot")]
+    logger.info(
+        "on_chat_resume 진입: thread_id=%s total_steps=%d snapshot_like=%d",
+        thread.get("id"), len(steps), len(snapshot_like),
+    )
+    for i, s in enumerate(snapshot_like):
+        keys = list(s.keys())
+        has_meta = bool(s.get("metadata"))
+        has_output = bool(s.get("output"))
+        logger.info(
+            "  snapshot[%d] name=%r keys=%s has_metadata=%s has_output=%s",
+            i, s.get("name"), keys, has_meta, has_output,
+        )
+
     snapshot = _find_snapshot(thread)
     if not snapshot:
-        logger.info("on_chat_resume: snapshot 없음 — thread_id=%s", thread.get("id"))
+        logger.info("on_chat_resume: snapshot step 없음 — thread_id=%s", thread.get("id"))
         return
 
-    # metadata는 SQLAlchemyDataLayer에서 JSON 문자열로 돌아올 수 있어 정규화.
-    meta = _parse_snapshot_meta(snapshot.get("metadata"))
-    doc_id       = meta.get("doc_id") or ""
-    summary_dict = meta.get("summary") or {}
-    chunks_path  = meta.get("chunks_path") or ""
+    payload = _extract_snapshot_payload(snapshot)
+    if not payload:
+        logger.warning("on_chat_resume: snapshot payload 비어있음 — 복원 중단")
+        return
+
+    doc_id       = payload.get("doc_id") or ""
+    summary_dict = payload.get("summary") or {}
+    chunks_path  = payload.get("chunks_path") or ""
 
     raw_chunks = _load_chunks_from_disk(chunks_path)
 
@@ -644,7 +700,8 @@ async def on_chat_resume(thread: ThreadDict):
 
     logger.info(
         "on_chat_resume: 복원 완료 doc_id=%s chunks=%d summary_sections=%d",
-        doc_id, len(raw_chunks), len(summary_dict.get("sections", [])) if isinstance(summary_dict, dict) else 0,
+        doc_id, len(raw_chunks),
+        len(summary_dict.get("sections", [])) if isinstance(summary_dict, dict) else 0,
     )
 
     # 벡터 인덱스 재구성 — 메모리 싱글턴이라 프로세스 재시작 후엔 비어있음.
@@ -652,8 +709,8 @@ async def on_chat_resume(thread: ThreadDict):
     if raw_chunks:
         _index_in_background(_wrap_str_chunks_for_index(raw_chunks), doc_id)
         _warmup_reranker_in_background()
-    else:
-        # chunks 파일 소실 — 사용자에게 왜 Q&A가 안 되는지 미리 알림.
+    elif chunks_path:
+        # chunks_path는 있었는데 파일이 없음 = 소실. 사용자에게 명시적 안내.
         await cl.Message(
             content=(
                 "ℹ️ 이전 대화를 불러왔습니다. 요약은 그대로 확인할 수 있지만, "
@@ -772,7 +829,7 @@ async def on_message(message: cl.Message):
         cl.user_session.set("pdf_sidebar_open", False)
 
         # #99 Chat Resume — 세션 상태를 thread에 스냅샷으로 영속화.
-        # raw_chunks는 별도 파일, 나머지 메타는 step metadata에 기록.
+        # raw_chunks는 별도 파일, 나머지 payload는 step metadata+output에 기록.
         chunks_path = _save_chunks_to_disk(doc_id, raw_chunks)
         await _save_session_snapshot(doc_id, summary_dict, chunks_path)
 
