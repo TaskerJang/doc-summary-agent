@@ -59,12 +59,19 @@ def _extract_raw_chunks(step3: dict) -> list[str]:
     return [c["text"] for c in chunks if c.get("text", "").strip()]
 
 
-def run_pipeline(
+async def run_pipeline(
     doc_path: Path,
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
 ) -> dict:
-    """단일 문서에 대해 파이프라인 실행 후 결과 반환."""
+    """단일 문서에 대해 파이프라인 실행 후 결과 반환.
+
+    run_step3는 async (#68 AsyncOpenAI 이관 후속) 이므로 run_pipeline도
+    async로 선언하고 await로 호출해야 한다. sync로 두면 coroutine이
+    그대로 반환되어 step3.get(...) 호출 시 AttributeError 발생.
+    (evaluate_qa는 이미 await로 갱신됐는데 run_pipeline은 누락된
+     stale dependency 였음 — 4월 중순부터 평가 경로가 동작 불능.)
+    """
     logger.info("파이프라인 실행: %s (chunk_size=%s, chunk_overlap=%s)",
                 doc_path.name, chunk_size, chunk_overlap)
 
@@ -82,7 +89,7 @@ def run_pipeline(
     if step2.get("status") == "error":
         return step2
 
-    step3 = run_step3(step2)
+    step3 = await run_step3(step2)
     return step3
 
 
@@ -183,7 +190,7 @@ async def run_eval(
             for chunk_overlap in chunk_overlaps:
                 logger.info("=== 문서: %s | chunk_size: %s | chunk_overlap: %s | bm25: %s ===",
                             doc_name, chunk_size, chunk_overlap, use_bm25)
-                step3 = run_pipeline(doc_path, chunk_size, chunk_overlap)
+                step3 = await run_pipeline(doc_path, chunk_size, chunk_overlap)
                 if step3.get("status") == "error":
                     logger.error("파이프라인 실패: %s", step3)
                     continue
