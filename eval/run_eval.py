@@ -9,6 +9,7 @@ eval/run_eval.py
     uv run python eval/run_eval.py --chunk-size 500 --chunk-overlap 100 --tag baseline_v3
     uv run python eval/run_eval.py --chunk-size 500 --chunk-overlap 100 --no-bm25 --tag no_bm25_v3
     uv run python eval/run_eval.py --doc 한화투자증권_두산밥캣_기업분석_리포트.pdf
+    uv run python eval/run_eval.py --no-dense --tag bm25_only       # Qdrant 미사용 (BM25 단독)
 """
 import argparse
 import asyncio
@@ -63,6 +64,7 @@ async def run_pipeline(
     doc_path: Path,
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
+    use_dense: bool = True,
 ) -> dict:
     """단일 문서에 대해 파이프라인 실행 후 결과 반환.
 
@@ -71,9 +73,15 @@ async def run_pipeline(
     그대로 반환되어 step3.get(...) 호출 시 AttributeError 발생.
     (evaluate_qa는 이미 await로 갱신됐는데 run_pipeline은 누락된
      stale dependency 였음 — 4월 중순부터 평가 경로가 동작 불능.)
+
+    Args:
+        use_dense: True면 step3 후 Qdrant에 청크 인덱싱하고 doc_id를
+                   step3에 박아 evaluate_qa가 ask()에 전달하도록 한다.
+                   False면 인덱싱 스킵 → ask()는 BM25 단독으로 동작
+                   (기존 README 평가 시점과 동일 조건).
     """
-    logger.info("파이프라인 실행: %s (chunk_size=%s, chunk_overlap=%s)",
-                doc_path.name, chunk_size, chunk_overlap)
+    logger.info("파이프라인 실행: %s (chunk_size=%s, chunk_overlap=%s, dense=%s)",
+                doc_path.name, chunk_size, chunk_overlap, use_dense)
 
     step1 = run_step1(doc_path)
     if step1.get("status") == "error":
@@ -90,6 +98,24 @@ async def run_pipeline(
         return step2
 
     step3 = await run_step3(step2)
+
+    # Qdrant 인덱싱 — 평가 경로에 dense 검색 활성화
+    # 기존엔 doc_id 미전달로 ask()가 BM25 단독으로 떨어졌다.
+    # use_dense=True 일 때만 인덱싱하고 doc_id를 step3에 박는다.
+    # 인덱싱 실패 시 doc_id 미설정 → ask() 자동 BM25 fallback.
+    if use_dense and step3.get("status") != "error":
+        try:
+            from summarizer.embedder import index_chunks
+            chunks_for_index = step3.get("chunks", [])
+            if chunks_for_index:
+                doc_id = doc_path.stem  # 파일명(확장자 제외)을 doc_id로 사용
+                index_chunks(chunks_for_index, doc_id)
+                step3["doc_id"] = doc_id
+                logger.info("Qdrant 인덱싱 완료: doc_id=%s (%d청크)",
+                            doc_id, len(chunks_for_index))
+        except Exception as e:
+            logger.warning("Qdrant 인덱싱 실패 — BM25 단독 fallback: %s", e)
+
     return step3
 
 
@@ -99,6 +125,9 @@ async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: b
     ask()는 async def이므로 await 필요. (#68 AsyncOpenAI 이관 이후
     run_eval.py 쪽이 갱신되지 않아 coroutine을 그대로 반환받던 버그를
     #107 작업과 함께 수정.)
+
+    step3에 doc_id가 박혀있으면 ask()에 전달 → BM25+Dense+RRF+Reranker
+    풀 하이브리드 경로. 없으면 BM25 단독으로 동작 (자동 fallback).
 
     Args:
         use_bm25: False면 raw_chunks=[] 전달 + pinned_section_indices=[] 로
@@ -117,8 +146,14 @@ async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: b
         raw_chunks          = []
         pinned_indices      = []   # 빈 리스트 → relevant_sections = []
 
-    qa_result  = await ask(question, summary, raw_chunks=raw_chunks,
-                           pinned_section_indices=pinned_indices)
+    doc_id = step3.get("doc_id")  # run_pipeline에서 인덱싱 성공 시 박힌 값
+
+    qa_result  = await ask(
+        question, summary,
+        raw_chunks=raw_chunks,
+        pinned_section_indices=pinned_indices,
+        doc_id=doc_id,
+    )
     prediction = qa_result.answer if qa_result.is_answerable else "[답변 불가]"
 
     rouge   = compute_rouge(prediction, reference)
@@ -139,6 +174,7 @@ async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: b
         "num_matched":    num_acc["matched"],
         "num_missed":     num_acc["missed"],
         "bm25_enabled":   use_bm25,
+        "dense_enabled":  doc_id is not None,
     }
 
     source_text = step3.get("clean_text", "")
@@ -164,6 +200,7 @@ async def run_eval(
     chunk_overlaps: list[int] | None = None,
     filter_doc: str | None = None,
     use_bm25: bool = True,
+    use_dense: bool = True,
 ) -> list[dict]:
     """전체 평가 파이프라인 실행."""
     if chunk_sizes is None:
@@ -188,9 +225,11 @@ async def run_eval(
 
         for chunk_size in chunk_sizes:
             for chunk_overlap in chunk_overlaps:
-                logger.info("=== 문서: %s | chunk_size: %s | chunk_overlap: %s | bm25: %s ===",
-                            doc_name, chunk_size, chunk_overlap, use_bm25)
-                step3 = await run_pipeline(doc_path, chunk_size, chunk_overlap)
+                logger.info("=== 문서: %s | chunk_size: %s | chunk_overlap: %s | bm25: %s | dense: %s ===",
+                            doc_name, chunk_size, chunk_overlap, use_bm25, use_dense)
+                step3 = await run_pipeline(
+                    doc_path, chunk_size, chunk_overlap, use_dense=use_dense,
+                )
                 if step3.get("status") == "error":
                     logger.error("파이프라인 실패: %s", step3)
                     continue
@@ -242,9 +281,17 @@ def print_summary(results: list[dict]) -> None:
     avg_comp  = sum(comp_vals) / len(comp_vals) if comp_vals else 0.0
     avg_conc  = sum(conc_vals) / len(conc_vals) if conc_vals else 0.0
 
-    bm25_flag = results[0].get("bm25_enabled", True)
+    bm25_flag  = results[0].get("bm25_enabled", True)
+    dense_flag = results[0].get("dense_enabled", False)
+    mode_label = []
+    if bm25_flag:
+        mode_label.append("BM25")
+    if dense_flag:
+        mode_label.append("Dense+Rerank")
+    mode_str = "+".join(mode_label) if mode_label else "Overall-only"
+
     print("\n" + "=" * 60)
-    print(f"📊 평가 결과 요약  (총 {total}개 QA | BM25: {'ON' if bm25_flag else 'OFF'})")
+    print(f"📊 평가 결과 요약  (총 {total}개 QA | 검색 모드: {mode_str})")
     print("=" * 60)
     print(f"  ROUGE-1:           {avg_rouge1:.4f}")
     print(f"  ROUGE-2:           {avg_rouge2:.4f}")
@@ -275,6 +322,8 @@ def main():
                         help="결과 파일 태그")
     parser.add_argument("--no-bm25", action="store_true",
                         help="BM25 검색 비활성화 (섹션·청크 BM25 모두 OFF, overall fallback만 사용) — BM25 도입 전 기준값 측정용")
+    parser.add_argument("--no-dense", action="store_true",
+                        help="Dense(Qdrant) 검색 비활성화 — BM25 단독 측정용. README 시점과 동일 조건 재현 가능.")
     args = parser.parse_args()
 
     qa_pairs = json.loads(QA_PATH.read_text(encoding="utf-8"))
@@ -287,6 +336,7 @@ def main():
         chunk_overlaps=args.chunk_overlap,
         filter_doc=args.doc or None,
         use_bm25=not args.no_bm25,
+        use_dense=not args.no_dense,
     ))
 
     save_results(results, tag=args.tag)
