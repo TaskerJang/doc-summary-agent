@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +30,54 @@ OCR_WARNING_PATH    = PROMPTS_DIR / "ocr_warning_v1.md"
 CHUNK_PROMPT_PATH   = PROMPTS_DIR / "chunk_summary_v1.md"
 OVERALL_PROMPT_PATH = PROMPTS_DIR / "overall_summary_v1.md"
 
-# ── AsyncOpenAI 클라이언트 ─────────────────────────────────
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ── LLM Runtime Config (#127) ────────────────────────────
+# 평가 진입점에서 configure_llm()으로 토글 가능. 호출 안 하면 기본 GPT-5.2 + OpenAI 직결.
+# prod 경로 (Chainlit UI)는 configure_llm()을 호출하지 않으므로 영향 0.
+@dataclass
+class LLMConfig:
+    """LLM 호출 설정. OpenRouter 등 OpenAI-호환 endpoint 토글용."""
+    model: str
+    base_url: str | None = None  # None이면 OpenAI 기본
+    api_key_env: str = "OPENAI_API_KEY"
+
+
+# 모듈 레벨 상태 — configure_llm()으로 재설정 가능
+_active_client: AsyncOpenAI = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_active_model: str = MODEL
+
+
+def configure_llm(
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key_env: str = "OPENAI_API_KEY",
+) -> None:
+    """평가 진입점에서 LLM 호출을 일회성으로 재설정한다 (#127).
+
+    Args:
+        model: 사용할 모델 ID (예: "openai/gpt-5-mini", "moonshotai/kimi-k2.5").
+               None이면 기존 MODEL ("gpt-5.2") 유지.
+        base_url: OpenAI-호환 endpoint base URL. OpenRouter면 "https://openrouter.ai/api/v1".
+                  None이면 OpenAI 기본.
+        api_key_env: API 키를 읽을 환경변수 이름. 기본 "OPENAI_API_KEY".
+
+    호출 안 하면 모듈 import 시점의 기본값 (gpt-5.2 + OpenAI 직결) 유지 — prod 영향 0.
+    """
+    global _active_client, _active_model
+    api_key = os.getenv(api_key_env)
+    if not api_key:
+        raise RuntimeError(f"환경변수 {api_key_env} 미설정 — LLM 재설정 불가")
+    _active_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    if model is not None:
+        _active_model = model
+    logger.info(
+        "LLM 재설정: model=%s base_url=%s api_key_env=%s",
+        _active_model, base_url, api_key_env,
+    )
+
+# ── AsyncOpenAI 클라이언트 (하위 호환 alias) ──────────────
+# 외부에서 `from summarizer.llm import client` 하는 경로가 있을 수 있어 유지.
+# 단, 실제 _call_api는 _active_client를 사용 — configure_llm() 시 토글됨.
+client = _active_client
 
 # ── Semaphore (모듈 레벨 — 이벤트 루프와 생명주기 공유) ────
 _sem: asyncio.Semaphore | None = None
@@ -84,8 +131,13 @@ def _load_system_prompt(is_image_based: bool) -> str:
     reraise=True,
 )
 async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
-    response = await client.chat.completions.create(
-        model=MODEL,
+    """LLM 호출 — _active_client / _active_model 사용 (#127).
+
+    configure_llm() 호출 안 한 상태면 기본 GPT-5.2 + OpenAI 직결.
+    호출했다면 그 설정대로 동작.
+    """
+    response = await _active_client.chat.completions.create(
+        model=_active_model,
         messages=messages,
         temperature=0.3,
         max_completion_tokens=max_tokens,
