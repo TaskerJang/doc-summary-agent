@@ -6,6 +6,11 @@ RAGAS Answer Correctness + GraphRAG-Bench Accuracy 결합 — 의미적 일치 L
 - GraphRAG-Bench (arxiv:2506.02404, ICLR 2026) Accuracy 메트릭
 
 doc-graph-agent 와 동일 코드 — #127 대칭 메트릭 분리.
+
+## Reasoning OFF (#133 후속 — PR #132 충돌 해결 시 통합)
+
+faithfulness_judge.py 와 동일 패턴 — _REASONING_OFF_BODY 재사용 + reasoning fallback.
+OpenRouter 경유 시만 extra_body 박기 — Kimi 직결 / OpenAI 직결 영향 0.
 """
 import json
 import logging
@@ -18,6 +23,7 @@ from openai import RateLimitError, APITimeoutError, APIConnectionError
 from eval.metrics.faithfulness_judge import (
     _relax_schema,
     _is_openai_native_model,
+    _REASONING_OFF_BODY,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,11 +39,14 @@ ANSWER_CORRECTNESS_PROMPT = (_PROMPTS_DIR / "answer_correctness_v1.md").read_tex
     reraise=True,
 )
 def _call_correctness_api(prompt: str, response_format: dict) -> dict:
+    # faithfulness_judge 의 _active_judge_client / _active_judge_model 재사용.
+    # configure_judge_llm() 이 호출되면 자동 반영 — 임포트 시점이 아닌 런타임에 모듈 속성 재조회.
     from eval.metrics import faithfulness_judge as fj
 
     client = fj._active_judge_client
     model = fj._active_judge_model
     strict_supported = fj._judge_strict_schema_supported
+    use_openrouter = fj._use_openrouter_extras
 
     rf = response_format if strict_supported else _relax_schema(response_format)
 
@@ -46,12 +55,15 @@ def _call_correctness_api(prompt: str, response_format: dict) -> dict:
         "messages": [{"role": "user", "content": prompt}],
         "max_completion_tokens": 1500,
         "response_format": rf,
-        "timeout": 30,
+        "timeout": 60,  # 30 -> 60s (reasoning 모델 대응)
     }
+    # Model-specific 분기 — faithfulness_judge 와 동일 패턴
     if _is_openai_native_model(model):
         call_kwargs["reasoning_effort"] = "low"
-    else:
-        call_kwargs["extra_body"] = {"reasoning": {"enabled": False}}
+    elif use_openrouter:
+        # OpenRouter 경유 (Claude/Kimi/DeepSeek) — reasoning 3중 OFF
+        # faithfulness_judge._REASONING_OFF_BODY 재사용
+        call_kwargs["extra_body"] = _REASONING_OFF_BODY
 
     try:
         response = client.chat.completions.create(**call_kwargs)
@@ -74,14 +86,21 @@ def _call_correctness_api(prompt: str, response_format: dict) -> dict:
     if not raw_content:
         msg = response.choices[0].message if response.choices else None
         reasoning_content = getattr(msg, "reasoning_content", None) if msg else None
-        if reasoning_content and "{" in reasoning_content:
-            try:
-                start = reasoning_content.find("{")
-                end = reasoning_content.rfind("}")
-                if start >= 0 and end > start:
-                    return json.loads(reasoning_content[start:end+1])
-            except (json.JSONDecodeError, ValueError):
-                pass
+        reasoning = getattr(msg, "reasoning", None) if msg else None
+        finish_reason = response.choices[0].finish_reason if response.choices else "?"
+        logger.warning(
+            "Answer Correctness 빈 content (model=%s finish_reason=%s) — fallback 시도",
+            model, finish_reason,
+        )
+        for candidate in (reasoning_content, reasoning):
+            if candidate and "{" in candidate:
+                try:
+                    start = candidate.find("{")
+                    end = candidate.rfind("}")
+                    if start >= 0 and end > start:
+                        return json.loads(candidate[start:end+1])
+                except (json.JSONDecodeError, ValueError):
+                    continue
         return {}
 
     if raw_content.startswith("```"):
