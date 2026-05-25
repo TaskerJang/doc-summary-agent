@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # ── 상수 ──────────────────────────────────────────────────
 MODEL          = "gpt-5.2"
-TIMEOUT        = 30
+TIMEOUT        = 60   # reasoning 모델 대응 — 30 → 60s 박음
 # chunk_size=700 기준 청크 수 감소 → Semaphore 상한도 16으로 상향
 # rate limit 여유가 있으면 더 올릴 수 있음
 MAX_CONCURRENT = 16
@@ -123,6 +123,18 @@ def _load_system_prompt(is_image_based: bool) -> str:
     return base
 
 
+# ── Reasoning OFF for OpenRouter reasoning models ──────────
+# Kimi K2.5, DeepSeek V3.2, GPT-5 등 reasoning 모델 박힌 케이스에서
+# thinking tokens 가 max_tokens 다 박아버리고 실제 출력은 빈 문자열 박힘.
+# OpenRouter 의 reasoning 파라미터로 reasoning 자체를 OFF 박아 출력 보장.
+# OpenAI 직결 시에는 extra_body 무시되므로 prod 경로 영향 0.
+_REASONING_OFF_BODY = {
+    "reasoning": {
+        "enabled": False,
+    },
+}
+
+
 # ── 재시도 데코레이터 ──────────────────────────────────────
 @retry(
     retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError)),
@@ -135,6 +147,10 @@ async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
 
     configure_llm() 호출 안 한 상태면 기본 GPT-5.2 + OpenAI 직결.
     호출했다면 그 설정대로 동작.
+
+    extra_body 의 reasoning OFF 박힘 — OpenRouter 의 reasoning model
+    (Kimi K2.5, DeepSeek V3.2 등) 에서 thinking tokens 가 max_tokens
+    다 박아버리고 출력 빈 문자열 박는 문제 방지. OpenAI 직결은 무시.
     """
     response = await _active_client.chat.completions.create(
         model=_active_model,
@@ -142,6 +158,7 @@ async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
         temperature=0.3,
         max_completion_tokens=max_tokens,
         timeout=TIMEOUT,
+        extra_body=_REASONING_OFF_BODY,
     )
     return response.choices[0].message.content or ""
 
