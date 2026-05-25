@@ -34,9 +34,6 @@ eval/run_eval.py
 
 #127 LLM 토글 — OpenRouter 경유 4 모델 측정 + Claude Haiku 4.5 judge:
 
-기본 패턴 (측정 + judge 모두 OpenRouter):
-    OPENROUTER_API_KEY 만 있으면 측정 + judge 둘 다 OpenRouter 경유로 가능.
-
     # Kimi K2.5 측정 + Claude Haiku 4.5 judge
     uv run python eval/run_eval.py \\
       --llm-model "moonshotai/kimi-k2.5" \\
@@ -108,7 +105,6 @@ def _to_summary_result(result: dict) -> SummaryResult | None:
 
 
 def _extract_raw_chunks(step3: dict) -> list[str]:
-    """step3 결과에서 원문 청크 텍스트 목록 추출."""
     chunks = step3.get("chunks", [])
     return [c["text"] for c in chunks if c.get("text", "").strip()]
 
@@ -317,10 +313,10 @@ async def evaluate_qa(
     source_text = step3.get("clean_text", "")
     judge = judge_faithfulness(source_text, prediction)
     result.update({
-        "faithfulness":          judge.get("faithfulness", "Error"),
-        "faithfulness_reason":   judge.get("faithfulness_reason", ""),
-        "completeness":          judge.get("completeness", None),
-        "conciseness":           judge.get("conciseness", None),
+        "faithfulness":        judge.get("faithfulness", "Error"),
+        "faithfulness_reason": judge.get("faithfulness_reason", ""),
+        "completeness":        judge.get("completeness", None),
+        "conciseness":         judge.get("conciseness", None),
     })
 
     num_judge = judge_numerical_faithfulness(source_text, prediction)
@@ -495,7 +491,6 @@ async def run_eval(
 
 
 def save_results(results: list[dict], tag: str = "") -> Path:
-    """결과를 JSON 파일로 저장."""
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"eval_results_{tag}_{ts}.json" if tag else f"eval_results_{ts}.json"
     path = RESULT_DIR / name
