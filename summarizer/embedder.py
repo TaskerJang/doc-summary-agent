@@ -3,7 +3,7 @@
 
 역할:
 - 청크 텍스트를 BAAI/bge-m3로 로컬 임베딩 (한국어 금융 문서 최적화)
-- Qdrant 로컬 인스턴스에 저장/검색
+- Qdrant 로컬 인스턴스 또는 Qdrant Cloud에 저장/검색
 - 세션별 컬렉션 격리 (collection_name = doc_id 해시)
 - #75: doc_year·section_type·metrics payload 저장 + must 필터 검색
 
@@ -21,6 +21,7 @@ bge prefix 규칙 (공식 권고):
 의존:
     uv add qdrant-client sentence-transformers
     docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
+    또는 Qdrant Cloud (https://cloud.qdrant.io) — QDRANT_URL + QDRANT_API_KEY 환경변수 설정
 """
 from __future__ import annotations
 
@@ -37,7 +38,8 @@ from qdrant_client.models import (
 
 logger = logging.getLogger(__name__)
 
-_QDRANT_URL  = os.getenv("QDRANT_URL", "http://localhost:6333")
+_QDRANT_URL     = os.getenv("QDRANT_URL", "http://localhost:6333")
+_QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # Qdrant Cloud 사용 시 필요. 로컬 도커면 None.
 _EMBED_MODEL = "BAAI/bge-m3"
 _EMBED_DIM   = 1024
 _BATCH_SIZE  = 32  # bge-m3는 모델이 커서 배치 작게
@@ -62,9 +64,22 @@ def _get_encoder():
 
 
 def _get_qdrant() -> QdrantClient:
+    """Qdrant 클라이언트 싱글턴.
+
+    QDRANT_API_KEY 환경변수가 설정되어 있으면 인증 헤더 자동 추가 (Qdrant Cloud용).
+    None이면 인증 없이 연결 (로컬 도커 호환).
+    """
     global _qdrant_client
     if _qdrant_client is None:
-        _qdrant_client = QdrantClient(url=_QDRANT_URL, timeout=10)
+        _qdrant_client = QdrantClient(
+            url=_QDRANT_URL,
+            api_key=_QDRANT_API_KEY,  # None이면 인증 안 함 (로컬 도커 호환)
+            timeout=10,
+        )
+        if _QDRANT_API_KEY:
+            logger.info("Qdrant 클라이언트 연결: %s (API key 인증)", _QDRANT_URL)
+        else:
+            logger.info("Qdrant 클라이언트 연결: %s (인증 없음)", _QDRANT_URL)
     return _qdrant_client
 
 
