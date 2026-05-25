@@ -58,6 +58,15 @@ eval/run_eval.py
 
     # 인자 미지정 시 기본 GPT-5.2 OpenAI 직결 (기존 동작, OPENAI_API_KEY 필요)
     uv run python eval/run_eval.py --tag baseline_gpt52
+
+#multi-doc multi-doc QA 지원:
+    평가셋의 doc 필드가 콤마로 여러 파일명을 포함하면 multi-doc QA로 인식하여
+    각 문서를 독립 파이프라인으로 처리한 뒤 chunks / clean_text / summary 를
+    병합하여 ask() 1회 호출. RAG 시스템이 multi-doc 영역을 처리할 때의 실제 동작과
+    한계를 측정하기 위함.
+
+    예시 doc 필드:
+        "미래에셋증권_1분기_실적보고서.pdf,미래에셋증권_2분기_실적보고서.pdf"
 """
 import argparse
 import asyncio
@@ -171,6 +180,91 @@ async def run_pipeline(
     return step3
 
 
+async def _run_pipeline_multi(
+    doc_names: list[str],
+    docs_dir: Path,
+    chunk_size: int | None,
+    chunk_overlap: int | None,
+    use_dense: bool,
+) -> dict | None:
+    """multi-doc QA 용 파이프라인 — 여러 문서를 독립 실행 후 결과 병합.
+
+    각 문서를 run_pipeline() 으로 처리한 뒤:
+    - chunks: 모든 문서의 chunk 를 합침 (각 chunk 에 source_doc 메타 추가)
+    - clean_text: 모든 문서의 본문을 === <doc> === 구분자로 연결
+    - summary: 각 문서 summary 의 sections 를 모두 합쳐 단일 SummaryResult 구성
+    - doc_id: Qdrant 인덱싱은 use_dense=True 일 때만, 첫 문서 doc_id 사용
+      (multi-doc Qdrant 검색은 별도 인프라 필요 — 본 작업 범위 밖)
+
+    Returns:
+        병합된 step3 dict. 실패 시 None.
+    """
+    merged_chunks: list[dict] = []
+    merged_clean_text_parts: list[str] = []
+    merged_sections: list[dict] = []
+    merged_overall_parts: list[str] = []
+    is_image_based = False
+    first_doc_id = None
+
+    for doc_name in doc_names:
+        doc_path = docs_dir / doc_name
+        step3 = await run_pipeline(doc_path, chunk_size, chunk_overlap, use_dense=use_dense)
+        if step3.get("status") == "error":
+            logger.error("multi-doc 내 문서 실패: %s", doc_name)
+            return None
+
+        # chunks 병합 — 출처 추적용 source_doc 메타 부착
+        for c in step3.get("chunks", []):
+            chunk_copy = dict(c)
+            chunk_copy["source_doc"] = doc_name
+            merged_chunks.append(chunk_copy)
+
+        # clean_text 병합 (judge 가 source_text 로 사용)
+        clean = step3.get("clean_text", "")
+        if clean:
+            merged_clean_text_parts.append(f"=== {doc_name} ===\n{clean}")
+
+        # summary 병합
+        summary_dict = step3.get("summary") or {}
+        sections = summary_dict.get("sections", [])
+        # 각 section 의 heading 에 출처 doc 표시
+        for s in sections:
+            s_copy = dict(s)
+            if "heading" in s_copy:
+                s_copy["heading"] = f"[{doc_name}] {s_copy['heading']}"
+            merged_sections.append(s_copy)
+
+        overall = summary_dict.get("overall", "")
+        if overall:
+            merged_overall_parts.append(f"[{doc_name}] {overall}")
+
+        if summary_dict.get("is_image_based"):
+            is_image_based = True
+
+        if first_doc_id is None and step3.get("doc_id"):
+            first_doc_id = step3.get("doc_id")
+
+    merged_step3 = {
+        "chunks": merged_chunks,
+        "clean_text": "\n\n".join(merged_clean_text_parts),
+        "summary": {
+            "overall": "\n\n".join(merged_overall_parts),
+            "sections": merged_sections,
+            "is_image_based": is_image_based,
+        },
+        "is_image_based": is_image_based,
+        "status": "ok",
+    }
+    if first_doc_id:
+        merged_step3["doc_id"] = first_doc_id
+
+    logger.info("multi-doc 병합 완료 — %d docs, %d chunks, clean_text=%d chars",
+                len(doc_names), len(merged_chunks),
+                len(merged_step3["clean_text"]))
+
+    return merged_step3
+
+
 async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: bool = True) -> dict:
     """단일 QA 쌍에 대해 모든 지표를 계산한다.
 
@@ -187,7 +281,7 @@ async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: b
     """
     question  = qa["question"]
     reference = qa["answer"]
-    qa_type   = qa["type"]
+    qa_type   = qa.get("type") or qa.get("pattern", "unknown")
 
     if use_bm25:
         # BM25 활성화: 원문 청크 전달 → _find_relevant_chunks_bm25 + _find_relevant_sections_bm25 동작
@@ -254,7 +348,14 @@ async def run_eval(
     use_bm25: bool = True,
     use_dense: bool = True,
 ) -> list[dict]:
-    """전체 평가 파이프라인 실행."""
+    """전체 평가 파이프라인 실행.
+
+    #multi-doc multi-doc QA 지원:
+    - qa["doc"] 가 콤마로 여러 파일명을 포함하면 multi-doc QA 로 처리.
+    - 각 문서별로 독립적으로 step1~step3 실행 후, chunk 풀과 summary 를
+      병합하여 ask() 1회 호출. RAG 시스템이 multi-doc 영역을 처리할 때의
+      실제 동작과 한계를 측정하기 위함.
+    """
     if chunk_sizes is None:
         chunk_sizes = [None]
     if chunk_overlaps is None:
@@ -262,22 +363,35 @@ async def run_eval(
 
     all_results = []
 
-    docs = {}
+    # QA 를 single-doc / multi-doc 로 분리
+    single_doc_qas: list[dict] = []
+    multi_doc_qas: list[dict] = []
     for qa in qa_pairs:
         doc = qa["doc"]
-        if filter_doc and doc != filter_doc:
+        if filter_doc and filter_doc not in doc:
             continue
-        docs.setdefault(doc, []).append(qa)
+        if "," in doc:
+            multi_doc_qas.append(qa)
+        else:
+            single_doc_qas.append(qa)
 
-    for doc_name, qas in docs.items():
+    logger.info("QA 분포 — single-doc: %d, multi-doc: %d",
+                len(single_doc_qas), len(multi_doc_qas))
+
+    # ── single-doc QA 처리 (기존 로직 유지) ────────────────
+    single_docs: dict[str, list[dict]] = {}
+    for qa in single_doc_qas:
+        single_docs.setdefault(qa["doc"], []).append(qa)
+
+    for doc_name, qas in single_docs.items():
         doc_path = docs_dir / doc_name
         if not doc_path.exists():
-            logger.warning("문서 없음: %s", doc_path)
+            logger.warning("문서 없음 (single-doc): %s", doc_path)
             continue
 
         for chunk_size in chunk_sizes:
             for chunk_overlap in chunk_overlaps:
-                logger.info("=== 문서: %s | chunk_size: %s | chunk_overlap: %s | bm25: %s | dense: %s ===",
+                logger.info("=== single-doc | %s | cs=%s ov=%s bm25=%s dense=%s ===",
                             doc_name, chunk_size, chunk_overlap, use_bm25, use_dense)
                 step3 = await run_pipeline(
                     doc_path, chunk_size, chunk_overlap, use_dense=use_dense,
@@ -295,9 +409,56 @@ async def run_eval(
                     result = await evaluate_qa(qa, summary, step3, use_bm25=use_bm25)
                     result["chunk_size"]    = chunk_size
                     result["chunk_overlap"] = chunk_overlap
+                    result["doc_mode"]      = "single"
                     all_results.append(result)
                     logger.info("QA [%s] ROUGE-L=%.3f Faithfulness=%s",
                                 qa["id"], result["rougeL"], result["faithfulness"])
+
+    # ── multi-doc QA 처리 (신규) ──────────────────────────
+    # 각 multi-doc QA 마다 콤마 split → 각 문서 step1~step3 → 결과 병합 → evaluate_qa
+    # 같은 doc 조합은 pipeline_cache 로 중복 파싱 회피.
+    pipeline_cache: dict[tuple, dict] = {}
+
+    for qa in multi_doc_qas:
+        doc_names = [d.strip() for d in qa["doc"].split(",") if d.strip()]
+
+        # 모든 문서 존재 확인
+        missing = [d for d in doc_names if not (docs_dir / d).exists()]
+        if missing:
+            logger.warning("multi-doc QA [%s] 문서 누락: %s — skip", qa["id"], missing)
+            continue
+
+        for chunk_size in chunk_sizes:
+            for chunk_overlap in chunk_overlaps:
+                cache_key = (tuple(sorted(doc_names)), chunk_size, chunk_overlap)
+
+                if cache_key in pipeline_cache:
+                    merged_step3 = pipeline_cache[cache_key]
+                    logger.info("multi-doc 캐시 hit — %d docs", len(doc_names))
+                else:
+                    logger.info("=== multi-doc | %d docs | cs=%s ov=%s ===",
+                                len(doc_names), chunk_size, chunk_overlap)
+                    merged_step3 = await _run_pipeline_multi(
+                        doc_names, docs_dir, chunk_size, chunk_overlap, use_dense,
+                    )
+                    if merged_step3 is None:
+                        logger.error("multi-doc 파이프라인 실패 — qa=%s", qa["id"])
+                        continue
+                    pipeline_cache[cache_key] = merged_step3
+
+                summary = _to_summary_result(merged_step3)
+                if not summary:
+                    logger.error("multi-doc 요약 결과 없음 — qa=%s", qa["id"])
+                    continue
+
+                result = await evaluate_qa(qa, summary, merged_step3, use_bm25=use_bm25)
+                result["chunk_size"]    = chunk_size
+                result["chunk_overlap"] = chunk_overlap
+                result["doc_mode"]      = "multi"
+                result["doc_count"]     = len(doc_names)
+                all_results.append(result)
+                logger.info("QA [%s] (multi-doc, %d docs) ROUGE-L=%.3f Faithfulness=%s",
+                            qa["id"], len(doc_names), result["rougeL"], result["faithfulness"])
 
     return all_results
 
@@ -360,6 +521,27 @@ def print_summary(results: list[dict]) -> None:
         subset = [r for r in results if r["type"] == t]
         avg    = sum(r["rougeL"] for r in subset) / len(subset)
         print(f"  {t:12s}: {avg:.4f}  (n={len(subset)})")
+
+    # ── #multi-doc single-doc / multi-doc 분리 결과 ──────
+    single_results = [r for r in results if r.get("doc_mode") == "single"]
+    multi_results  = [r for r in results if r.get("doc_mode") == "multi"]
+
+    if single_results and multi_results:
+        print("\n" + "=" * 60)
+        print(f"📁 문서 모드별 결과")
+        print("=" * 60)
+
+        for label, subset in [("single-doc", single_results), ("multi-doc", multi_results)]:
+            if not subset:
+                continue
+            n = len(subset)
+            avg_rouge_l = sum(r["rougeL"] for r in subset) / n
+            avg_num     = sum(r["num_accuracy"] for r in subset) / n
+            faith       = sum(1 for r in subset if r["faithfulness"] == "Faithful")
+            print(f"\n  [{label}] n={n}")
+            print(f"    ROUGE-L:       {avg_rouge_l:.4f}")
+            print(f"    수치 정확도:   {avg_num:.4f}")
+            print(f"    Faithfulness:  {faith}/{n} ({faith/n*100:.1f}%)")
 
 
 def main():
