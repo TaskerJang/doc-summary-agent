@@ -1,15 +1,36 @@
 """
 eval/run_eval.py
-평가 파이프라인 실행 진입점
+평가 파이프라인 실행 진입점 (#127 + multi-doc QA 지원)
 
-실행:
+## 메트릭 (Tier 1 + Tier 2)
+
+### Tier 1 — 전통 + FineSurE
+- ROUGE-1/2/L
+- 수치 정확도
+- Faithfulness / Completeness / Conciseness (FineSurE ACL 2024)
+- Numerical Faithfulness
+
+### Tier 2 — RAGAS + GraphRAG-Bench (#127)
+- Answer Correctness (RAGAS + GraphRAG-Bench Accuracy) — 의미적 일치 1-5점
+- Semantic Similarity (RAGAS) — bge-m3 cosine
+- Entity Coverage (RAGAS Context Entities Recall 변형)
+
+## Multi-doc QA 지원
+
+평가셋의 doc 필드가 콤마로 여러 파일명을 포함하면 multi-doc QA로 인식하여
+각 문서를 독립 파이프라인으로 처리한 뒤 chunks / clean_text / summary 를
+병합하여 ask() 1회 호출. RAG 시스템이 multi-doc 영역을 처리할 때의 실제 동작과
+한계를 측정하기 위함.
+
+예시 doc 필드:
+    "미래에셋증권_1분기_실적보고서.pdf,미래에셋증권_2분기_실적보고서.pdf"
+
+## 실행
+
     uv run python eval/run_eval.py
     uv run python eval/run_eval.py --chunk-size 500 700 1000
-    uv run python eval/run_eval.py --chunk-overlap 50 100 200
-    uv run python eval/run_eval.py --chunk-size 500 --chunk-overlap 100 --tag baseline_v3
-    uv run python eval/run_eval.py --chunk-size 500 --chunk-overlap 100 --no-bm25 --tag no_bm25_v3
-    uv run python eval/run_eval.py --doc 한화투자증권_두산밥캣_기업분석_리포트.pdf
-    uv run python eval/run_eval.py --no-dense --tag bm25_only       # Qdrant 미사용 (BM25 단독)
+    uv run python eval/run_eval.py --no-dense --tag bm25_only
+    uv run python eval/run_eval.py --no-semantic --tag fast_dryrun  # bge-m3 끄기
 
 #127 LLM 토글 — OpenRouter 경유 4 모델 측정 + Claude Haiku 4.5 judge:
 
@@ -24,9 +45,9 @@ eval/run_eval.py
       --judge-model "anthropic/claude-haiku-4.5" \\
       --judge-base-url "https://openrouter.ai/api/v1" \\
       --judge-api-key-env "OPENROUTER_API_KEY" \\
-      --tag "kimi_k2_5"
+      --no-dense --tag "kimi_multi_doc_80qa"
 
-    # DeepSeek V3.2
+    # DeepSeek V3.2 (BM25 단독)
     uv run python eval/run_eval.py \\
       --llm-model "deepseek/deepseek-v3.2" \\
       --llm-base-url "https://openrouter.ai/api/v1" \\
@@ -34,39 +55,7 @@ eval/run_eval.py
       --judge-model "anthropic/claude-haiku-4.5" \\
       --judge-base-url "https://openrouter.ai/api/v1" \\
       --judge-api-key-env "OPENROUTER_API_KEY" \\
-      --tag "deepseek_v32"
-
-    # GPT-5 Mini
-    uv run python eval/run_eval.py \\
-      --llm-model "openai/gpt-5-mini" \\
-      --llm-base-url "https://openrouter.ai/api/v1" \\
-      --llm-api-key-env "OPENROUTER_API_KEY" \\
-      --judge-model "anthropic/claude-haiku-4.5" \\
-      --judge-base-url "https://openrouter.ai/api/v1" \\
-      --judge-api-key-env "OPENROUTER_API_KEY" \\
-      --tag "gpt5_mini"
-
-    # Grok 4.20
-    uv run python eval/run_eval.py \\
-      --llm-model "x-ai/grok-4.20" \\
-      --llm-base-url "https://openrouter.ai/api/v1" \\
-      --llm-api-key-env "OPENROUTER_API_KEY" \\
-      --judge-model "anthropic/claude-haiku-4.5" \\
-      --judge-base-url "https://openrouter.ai/api/v1" \\
-      --judge-api-key-env "OPENROUTER_API_KEY" \\
-      --tag "grok_4_20"
-
-    # 인자 미지정 시 기본 GPT-5.2 OpenAI 직결 (기존 동작, OPENAI_API_KEY 필요)
-    uv run python eval/run_eval.py --tag baseline_gpt52
-
-#multi-doc multi-doc QA 지원:
-    평가셋의 doc 필드가 콤마로 여러 파일명을 포함하면 multi-doc QA로 인식하여
-    각 문서를 독립 파이프라인으로 처리한 뒤 chunks / clean_text / summary 를
-    병합하여 ask() 1회 호출. RAG 시스템이 multi-doc 영역을 처리할 때의 실제 동작과
-    한계를 측정하기 위함.
-
-    예시 doc 필드:
-        "미래에셋증권_1분기_실적보고서.pdf,미래에셋증권_2분기_실적보고서.pdf"
+      --no-dense --tag "deepseek_bm25"
 """
 import argparse
 import asyncio
@@ -92,6 +81,9 @@ from eval.metrics.faithfulness_judge import (
     judge_numerical_faithfulness,
     configure_judge_llm,
 )
+# #127 Tier 2 메트릭
+from eval.metrics.answer_correctness import judge_answer_correctness
+from eval.metrics.entity_coverage import compute_entity_coverage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -130,16 +122,12 @@ async def run_pipeline(
     """단일 문서에 대해 파이프라인 실행 후 결과 반환.
 
     run_step3는 async (#68 AsyncOpenAI 이관 후속) 이므로 run_pipeline도
-    async로 선언하고 await로 호출해야 한다. sync로 두면 coroutine이
-    그대로 반환되어 step3.get(...) 호출 시 AttributeError 발생.
-    (evaluate_qa는 이미 await로 갱신됐는데 run_pipeline은 누락된
-     stale dependency 였음 — 4월 중순부터 평가 경로가 동작 불능.)
+    async로 선언하고 await로 호출해야 한다.
 
     Args:
         use_dense: True면 step3 후 Qdrant에 청크 인덱싱하고 doc_id를
                    step3에 박아 evaluate_qa가 ask()에 전달하도록 한다.
-                   False면 인덱싱 스킵 → ask()는 BM25 단독으로 동작
-                   (기존 README 평가 시점과 동일 조건).
+                   False면 인덱싱 스킵 → ask()는 BM25 단독으로 동작.
     """
     logger.info("파이프라인 실행: %s (chunk_size=%s, chunk_overlap=%s, dense=%s)",
                 doc_path.name, chunk_size, chunk_overlap, use_dense)
@@ -160,16 +148,12 @@ async def run_pipeline(
 
     step3 = await run_step3(step2)
 
-    # Qdrant 인덱싱 — 평가 경로에 dense 검색 활성화
-    # 기존엔 doc_id 미전달로 ask()가 BM25 단독으로 떨어졌다.
-    # use_dense=True 일 때만 인덱싱하고 doc_id를 step3에 박는다.
-    # 인덱싱 실패 시 doc_id 미설정 → ask() 자동 BM25 fallback.
     if use_dense and step3.get("status") != "error":
         try:
             from summarizer.embedder import index_chunks
             chunks_for_index = step3.get("chunks", [])
             if chunks_for_index:
-                doc_id = doc_path.stem  # 파일명(확장자 제외)을 doc_id로 사용
+                doc_id = doc_path.stem
                 index_chunks(chunks_for_index, doc_id)
                 step3["doc_id"] = doc_id
                 logger.info("Qdrant 인덱싱 완료: doc_id=%s (%d청크)",
@@ -265,34 +249,38 @@ async def _run_pipeline_multi(
     return merged_step3
 
 
-async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: bool = True) -> dict:
-    """단일 QA 쌍에 대해 모든 지표를 계산한다.
+async def evaluate_qa(
+    qa: dict,
+    summary: SummaryResult,
+    step3: dict,
+    use_bm25: bool = True,
+    use_semantic: bool = True,
+) -> dict:
+    """단일 QA 쌍에 대해 모든 지표 (Tier 1 + Tier 2) 를 계산한다.
 
-    ask()는 async def이므로 await 필요. (#68 AsyncOpenAI 이관 이후
-    run_eval.py 쪽이 갱신되지 않아 coroutine을 그대로 반환받던 버그를
-    #107 작업과 함께 수정.)
-
-    step3에 doc_id가 박혀있으면 ask()에 전달 → BM25+Dense+RRF+Reranker
-    풀 하이브리드 경로. 없으면 BM25 단독으로 동작 (자동 fallback).
+    Tier 1: ROUGE / 수치 정확도 / Faithfulness / Numerical Faithfulness
+    Tier 2: Answer Correctness / Semantic Similarity / Entity Coverage
 
     Args:
         use_bm25: False면 raw_chunks=[] 전달 + pinned_section_indices=[] 로
-                  BM25 섹션/청크 검색을 모두 비활성화 (BM25 도입 전 기준값 측정용)
+                  BM25 섹션/청크 검색을 모두 비활성화.
+        use_semantic: False면 Semantic Similarity 메트릭 스킵 (CPU 부담 회피).
     """
     question  = qa["question"]
     reference = qa["answer"]
     qa_type   = qa.get("type") or qa.get("pattern", "unknown")
+    # #127: qa_set / key_entities — VectorRAG / GraphRAG 분계 필드
+    qa_set       = qa.get("qa_set", "vectorrag")
+    key_entities = qa.get("key_entities", [])
 
     if use_bm25:
-        # BM25 활성화: 원문 청크 전달 → _find_relevant_chunks_bm25 + _find_relevant_sections_bm25 동작
         raw_chunks          = _extract_raw_chunks(step3)
         pinned_indices      = None
     else:
-        # BM25 비활성화: 청크·섹션 BM25 검색 모두 스킵 → overall fallback만 사용
         raw_chunks          = []
-        pinned_indices      = []   # 빈 리스트 → relevant_sections = []
+        pinned_indices      = []
 
-    doc_id = step3.get("doc_id")  # run_pipeline에서 인덱싱 성공 시 박힌 값
+    doc_id = step3.get("doc_id")
 
     qa_result  = await ask(
         question, summary,
@@ -302,13 +290,16 @@ async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: b
     )
     prediction = qa_result.answer if qa_result.is_answerable else "[답변 불가]"
 
+    # Tier 1
     rouge   = compute_rouge(prediction, reference)
     num_acc = compute_numerical_accuracy(prediction, reference)
 
     result = {
         "id":             qa["id"],
+        "qa_set":         qa_set,
         "doc":            qa["doc"],
         "type":           qa_type,
+        "pattern":        qa.get("pattern", ""),
         "question":       question,
         "reference":      reference,
         "prediction":     prediction,
@@ -336,6 +327,32 @@ async def evaluate_qa(qa: dict, summary: SummaryResult, step3: dict, use_bm25: b
     result["numerical_faithfulness"]        = num_judge.get("numerical_faithfulness", "Error")
     result["numerical_faithfulness_reason"] = num_judge.get("reason", "")
 
+    # ── Tier 2 메트릭 ──────────────────────────────────────
+
+    # Answer Correctness (RAGAS + GraphRAG-Bench)
+    ac = judge_answer_correctness(question, reference, prediction)
+    result["answer_correctness"]        = ac.get("answer_correctness", None)
+    result["answer_correctness_reason"] = ac.get("reason", "")
+
+    # Semantic Similarity (RAGAS) — optional
+    if use_semantic:
+        try:
+            from eval.metrics.semantic_similarity import compute_semantic_similarity
+            sim = compute_semantic_similarity(prediction, reference)
+            result["semantic_similarity"] = sim.get("semantic_similarity", None)
+        except Exception as e:
+            logger.warning("semantic_similarity 스킵: %s", e)
+            result["semantic_similarity"] = None
+    else:
+        result["semantic_similarity"] = None
+
+    # Entity Coverage (RAGAS Context Entities Recall 변형)
+    ec = compute_entity_coverage(prediction, reference, key_entities=key_entities)
+    result["entity_coverage"] = ec["entity_coverage"]
+    result["entity_matched"]  = ec["matched"]
+    result["entity_missed"]   = ec["missed"]
+    result["entity_total"]    = ec["total"]
+
     return result
 
 
@@ -347,14 +364,14 @@ async def run_eval(
     filter_doc: str | None = None,
     use_bm25: bool = True,
     use_dense: bool = True,
+    use_semantic: bool = True,
 ) -> list[dict]:
     """전체 평가 파이프라인 실행.
 
     #multi-doc multi-doc QA 지원:
     - qa["doc"] 가 콤마로 여러 파일명을 포함하면 multi-doc QA 로 처리.
     - 각 문서별로 독립적으로 step1~step3 실행 후, chunk 풀과 summary 를
-      병합하여 ask() 1회 호출. RAG 시스템이 multi-doc 영역을 처리할 때의
-      실제 동작과 한계를 측정하기 위함.
+      병합하여 ask() 1회 호출.
     """
     if chunk_sizes is None:
         chunk_sizes = [None]
@@ -378,7 +395,7 @@ async def run_eval(
     logger.info("QA 분포 — single-doc: %d, multi-doc: %d",
                 len(single_doc_qas), len(multi_doc_qas))
 
-    # ── single-doc QA 처리 (기존 로직 유지) ────────────────
+    # ── single-doc QA 처리 ─────────────────────────────────
     single_docs: dict[str, list[dict]] = {}
     for qa in single_doc_qas:
         single_docs.setdefault(qa["doc"], []).append(qa)
@@ -406,15 +423,22 @@ async def run_eval(
                     continue
 
                 for qa in qas:
-                    result = await evaluate_qa(qa, summary, step3, use_bm25=use_bm25)
+                    result = await evaluate_qa(
+                        qa, summary, step3,
+                        use_bm25=use_bm25,
+                        use_semantic=use_semantic,
+                    )
                     result["chunk_size"]    = chunk_size
                     result["chunk_overlap"] = chunk_overlap
                     result["doc_mode"]      = "single"
                     all_results.append(result)
-                    logger.info("QA [%s] ROUGE-L=%.3f Faithfulness=%s",
-                                qa["id"], result["rougeL"], result["faithfulness"])
+                    logger.info(
+                        "QA [%s] ROUGE-L=%.3f Faithfulness=%s Correctness=%s",
+                        qa["id"], result["rougeL"], result["faithfulness"],
+                        result.get("answer_correctness"),
+                    )
 
-    # ── multi-doc QA 처리 (신규) ──────────────────────────
+    # ── multi-doc QA 처리 ──────────────────────────────────
     # 각 multi-doc QA 마다 콤마 split → 각 문서 step1~step3 → 결과 병합 → evaluate_qa
     # 같은 doc 조합은 pipeline_cache 로 중복 파싱 회피.
     pipeline_cache: dict[tuple, dict] = {}
@@ -451,14 +475,21 @@ async def run_eval(
                     logger.error("multi-doc 요약 결과 없음 — qa=%s", qa["id"])
                     continue
 
-                result = await evaluate_qa(qa, summary, merged_step3, use_bm25=use_bm25)
+                result = await evaluate_qa(
+                    qa, summary, merged_step3,
+                    use_bm25=use_bm25,
+                    use_semantic=use_semantic,
+                )
                 result["chunk_size"]    = chunk_size
                 result["chunk_overlap"] = chunk_overlap
                 result["doc_mode"]      = "multi"
                 result["doc_count"]     = len(doc_names)
                 all_results.append(result)
-                logger.info("QA [%s] (multi-doc, %d docs) ROUGE-L=%.3f Faithfulness=%s",
-                            qa["id"], len(doc_names), result["rougeL"], result["faithfulness"])
+                logger.info(
+                    "QA [%s] (multi-doc, %d docs) ROUGE-L=%.3f Faithfulness=%s Correctness=%s",
+                    qa["id"], len(doc_names), result["rougeL"], result["faithfulness"],
+                    result.get("answer_correctness"),
+                )
 
     return all_results
 
@@ -477,22 +508,18 @@ def save_results(results: list[dict], tag: str = "") -> Path:
 
 
 def print_summary(results: list[dict]) -> None:
-    """평가 결과 요약 출력."""
+    """평가 결과 요약 출력 — Tier 1 + Tier 2 + qa_set 분계 + doc_mode 분계."""
     if not results:
         print("결과 없음")
         return
 
-    total       = len(results)
-    avg_rouge1  = sum(r["rouge1"]      for r in results) / total
-    avg_rouge2  = sum(r["rouge2"]      for r in results) / total
-    avg_rougeL  = sum(r["rougeL"]      for r in results) / total
-    avg_num_acc = sum(r["num_accuracy"] for r in results) / total
-    faithful    = sum(1 for r in results if r["faithfulness"] == "Faithful")
+    def _avg(rs: list[dict], key: str) -> float:
+        vals = [r[key] for r in rs if isinstance(r.get(key), (int, float))]
+        return sum(vals) / len(vals) if vals else 0.0
 
-    comp_vals = [r["completeness"] for r in results if r["completeness"] is not None]
-    conc_vals = [r["conciseness"]  for r in results if r["conciseness"]  is not None]
-    avg_comp  = sum(comp_vals) / len(comp_vals) if comp_vals else 0.0
-    avg_conc  = sum(conc_vals) / len(conc_vals) if conc_vals else 0.0
+    def _faithful_rate(rs: list[dict]) -> tuple[int, int]:
+        f = sum(1 for r in rs if r.get("faithfulness") == "Faithful")
+        return f, len(rs)
 
     bm25_flag  = results[0].get("bm25_enabled", True)
     dense_flag = results[0].get("dense_enabled", False)
@@ -503,45 +530,63 @@ def print_summary(results: list[dict]) -> None:
         mode_label.append("Dense+Rerank")
     mode_str = "+".join(mode_label) if mode_label else "Overall-only"
 
-    print("\n" + "=" * 60)
-    print(f"📊 평가 결과 요약  (총 {total}개 QA | 검색 모드: {mode_str})")
-    print("=" * 60)
-    print(f"  ROUGE-1:           {avg_rouge1:.4f}")
-    print(f"  ROUGE-2:           {avg_rouge2:.4f}")
-    print(f"  ROUGE-L:           {avg_rougeL:.4f}")
-    print(f"  수치 정확도:       {avg_num_acc:.4f}")
-    print(f"  Faithfulness:      {faithful}/{total} ({faithful/total*100:.1f}%)")
-    print(f"  Completeness 평균: {avg_comp:.2f} / 5")
-    print(f"  Conciseness 평균:  {avg_conc:.2f} / 5")
-    print("=" * 60)
+    print("\n" + "=" * 78)
+    print(f"📊 평가 결과 요약  (총 {len(results)}개 QA | 검색 모드: {mode_str})")
+    print("=" * 78)
 
+    # qa_set 별 분계 (vectorrag / graphrag)
+    qa_sets = sorted(set(r.get("qa_set", "vectorrag") for r in results))
+    for qa_set in qa_sets:
+        subset = [r for r in results if r.get("qa_set", "vectorrag") == qa_set]
+        if not subset:
+            continue
+        f, t = _faithful_rate(subset)
+        print()
+        print(f"## {qa_set.upper()} QA  (n={len(subset)})")
+        print(f"  ── Tier 1 (전통 + FineSurE) ──")
+        print(f"  ROUGE-L:               {_avg(subset, 'rougeL'):.4f}")
+        print(f"  수치 정확도:             {_avg(subset, 'num_accuracy'):.4f}")
+        print(f"  Faithfulness:          {f}/{t} ({(f / t * 100) if t else 0:.1f}%)")
+        print(f"  Completeness:          {_avg(subset, 'completeness'):.2f} / 5")
+        print(f"  Conciseness:           {_avg(subset, 'conciseness'):.2f} / 5")
+        print(f"  ── Tier 2 (RAGAS + GraphRAG-Bench) ──")
+        print(f"  Answer Correctness:    {_avg(subset, 'answer_correctness'):.2f} / 5")
+        print(f"  Semantic Similarity:   {_avg(subset, 'semantic_similarity'):.4f}")
+        print(f"  Entity Coverage:       {_avg(subset, 'entity_coverage'):.4f}")
+
+    print("=" * 78)
+
+    # 질문 유형별 ROUGE-L + Correctness
     types = set(r["type"] for r in results)
-    print("\n📋 질문 유형별 ROUGE-L")
+    print("\n📋 질문 유형별 ROUGE-L / Answer Correctness")
     for t in sorted(types):
         subset = [r for r in results if r["type"] == t]
-        avg    = sum(r["rougeL"] for r in subset) / len(subset)
-        print(f"  {t:12s}: {avg:.4f}  (n={len(subset)})")
+        avg_r = sum(r["rougeL"] for r in subset) / len(subset) if subset else 0.0
+        ac_vals = [r["answer_correctness"] for r in subset if isinstance(r.get("answer_correctness"), int)]
+        avg_a = sum(ac_vals) / len(ac_vals) if ac_vals else 0.0
+        print(f"  {t:12s}: ROUGE-L={avg_r:.4f}  Correctness={avg_a:.2f}/5  (n={len(subset)})")
 
     # ── #multi-doc single-doc / multi-doc 분리 결과 ──────
     single_results = [r for r in results if r.get("doc_mode") == "single"]
     multi_results  = [r for r in results if r.get("doc_mode") == "multi"]
 
     if single_results and multi_results:
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 78)
         print(f"📁 문서 모드별 결과")
-        print("=" * 60)
+        print("=" * 78)
 
         for label, subset in [("single-doc", single_results), ("multi-doc", multi_results)]:
             if not subset:
                 continue
             n = len(subset)
-            avg_rouge_l = sum(r["rougeL"] for r in subset) / n
-            avg_num     = sum(r["num_accuracy"] for r in subset) / n
-            faith       = sum(1 for r in subset if r["faithfulness"] == "Faithful")
+            f = sum(1 for r in subset if r.get("faithfulness") == "Faithful")
             print(f"\n  [{label}] n={n}")
-            print(f"    ROUGE-L:       {avg_rouge_l:.4f}")
-            print(f"    수치 정확도:   {avg_num:.4f}")
-            print(f"    Faithfulness:  {faith}/{n} ({faith/n*100:.1f}%)")
+            print(f"    ROUGE-L:               {_avg(subset, 'rougeL'):.4f}")
+            print(f"    수치 정확도:             {_avg(subset, 'num_accuracy'):.4f}")
+            print(f"    Faithfulness:          {f}/{n} ({(f / n * 100) if n else 0:.1f}%)")
+            print(f"    Answer Correctness:    {_avg(subset, 'answer_correctness'):.2f} / 5")
+            print(f"    Semantic Similarity:   {_avg(subset, 'semantic_similarity'):.4f}")
+            print(f"    Entity Coverage:       {_avg(subset, 'entity_coverage'):.4f}")
 
 
 def main():
@@ -555,26 +600,28 @@ def main():
     parser.add_argument("--tag",  type=str, default="",
                         help="결과 파일 태그")
     parser.add_argument("--no-bm25", action="store_true",
-                        help="BM25 검색 비활성화 (섹션·청크 BM25 모두 OFF, overall fallback만 사용) — BM25 도입 전 기준값 측정용")
+                        help="BM25 검색 비활성화 — overall fallback만 사용")
     parser.add_argument("--no-dense", action="store_true",
-                        help="Dense(Qdrant) 검색 비활성화 — BM25 단독 측정용. README 시점과 동일 조건 재현 가능.")
+                        help="Dense(Qdrant) 검색 비활성화 — BM25 단독 측정용")
+    parser.add_argument("--no-semantic", action="store_true",
+                        help="Semantic Similarity 메트릭 끄기 (bge-m3 CPU 부담 회피)")
     # #127 측정 LLM 토글
     parser.add_argument("--llm-model", type=str, default=None,
-                        help="측정 대상 LLM 모델 ID (예: openai/gpt-5-mini, moonshotai/kimi-k2.5, deepseek/deepseek-v3.2, x-ai/grok-4.20). 미지정 시 기본 GPT-5.2.")
+                        help="측정 대상 LLM 모델 ID (예: deepseek/deepseek-v3.2)")
     parser.add_argument("--llm-base-url", type=str, default=None,
-                        help="측정 대상 LLM OpenAI-호환 endpoint base URL (예: https://openrouter.ai/api/v1). 미지정 시 OpenAI 기본.")
+                        help="측정 대상 LLM OpenAI-호환 endpoint base URL")
     parser.add_argument("--llm-api-key-env", type=str, default="OPENAI_API_KEY",
-                        help="측정 대상 LLM API 키 환경변수 이름. 기본 OPENAI_API_KEY, OpenRouter 경유 시 OPENROUTER_API_KEY.")
-    # #127 Judge LLM 토글 — 측정 대상과 독립 설정 (bias 방지)
+                        help="측정 대상 LLM API 키 환경변수 이름")
+    # #127 Judge LLM 토글
     parser.add_argument("--judge-model", type=str, default=None,
-                        help="Judge LLM 모델 ID (예: anthropic/claude-haiku-4.5). 미지정 시 기본 GPT-5.2.")
+                        help="Judge LLM 모델 ID (예: anthropic/claude-haiku-4.5)")
     parser.add_argument("--judge-base-url", type=str, default=None,
-                        help="Judge LLM OpenAI-호환 endpoint base URL (예: https://openrouter.ai/api/v1).")
+                        help="Judge LLM OpenAI-호환 endpoint base URL")
     parser.add_argument("--judge-api-key-env", type=str, default="OPENAI_API_KEY",
-                        help="Judge LLM API 키 환경변수 이름. 기본 OPENAI_API_KEY, OpenRouter 경유 시 OPENROUTER_API_KEY.")
+                        help="Judge LLM API 키 환경변수 이름")
     args = parser.parse_args()
 
-    # #127 측정 LLM 재설정 — 인자 명시 시에만 호출. 미지정 시 기존 GPT-5.2 + OpenAI 직결.
+    # #127 측정 LLM 재설정
     if args.llm_model or args.llm_base_url or args.llm_api_key_env != "OPENAI_API_KEY":
         configure_llm(
             model=args.llm_model,
@@ -582,7 +629,7 @@ def main():
             api_key_env=args.llm_api_key_env,
         )
 
-    # #127 Judge LLM 재설정 — 측정 대상과 독립. 인자 명시 시에만 호출.
+    # #127 Judge LLM 재설정
     if args.judge_model or args.judge_base_url or args.judge_api_key_env != "OPENAI_API_KEY":
         configure_judge_llm(
             model=args.judge_model,
@@ -591,6 +638,9 @@ def main():
         )
 
     qa_pairs = json.loads(QA_PATH.read_text(encoding="utf-8"))
+    # qa_set 필드 없으면 vectorrag 로 자동 박힘 (기존 호환)
+    for qa in qa_pairs:
+        qa.setdefault("qa_set", "vectorrag")
     logger.info("QA 쌍 로드: %d개", len(qa_pairs))
 
     results = asyncio.run(run_eval(
@@ -601,6 +651,7 @@ def main():
         filter_doc=args.doc or None,
         use_bm25=not args.no_bm25,
         use_dense=not args.no_dense,
+        use_semantic=not args.no_semantic,
     ))
 
     save_results(results, tag=args.tag)
