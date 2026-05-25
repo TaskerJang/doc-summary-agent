@@ -10,6 +10,38 @@ eval/run_eval.py
     uv run python eval/run_eval.py --chunk-size 500 --chunk-overlap 100 --no-bm25 --tag no_bm25_v3
     uv run python eval/run_eval.py --doc 한화투자증권_두산밥캣_기업분석_리포트.pdf
     uv run python eval/run_eval.py --no-dense --tag bm25_only       # Qdrant 미사용 (BM25 단독)
+
+#127 LLM 토글 — OpenRouter 경유 4 모델 측정:
+    # Kimi K2.5
+    uv run python eval/run_eval.py \\
+      --llm-model "moonshotai/kimi-k2.5" \\
+      --llm-base-url "https://openrouter.ai/api/v1" \\
+      --llm-api-key-env "OPENROUTER_API_KEY" \\
+      --tag "kimi_k2_5_openrouter"
+
+    # DeepSeek V3.2
+    uv run python eval/run_eval.py \\
+      --llm-model "deepseek/deepseek-v3.2" \\
+      --llm-base-url "https://openrouter.ai/api/v1" \\
+      --llm-api-key-env "OPENROUTER_API_KEY" \\
+      --tag "deepseek_v32_openrouter"
+
+    # GPT-5 Mini
+    uv run python eval/run_eval.py \\
+      --llm-model "openai/gpt-5-mini" \\
+      --llm-base-url "https://openrouter.ai/api/v1" \\
+      --llm-api-key-env "OPENROUTER_API_KEY" \\
+      --tag "gpt5_mini_openrouter"
+
+    # Grok 4.20
+    uv run python eval/run_eval.py \\
+      --llm-model "x-ai/grok-4.20" \\
+      --llm-base-url "https://openrouter.ai/api/v1" \\
+      --llm-api-key-env "OPENROUTER_API_KEY" \\
+      --tag "grok_4_20_openrouter"
+
+    # 인자 미지정 시 기본 GPT-5.2 OpenAI 직결 (기존 동작)
+    uv run python eval/run_eval.py --tag baseline_gpt52
 """
 import argparse
 import asyncio
@@ -26,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from main import run_step1, run_step2, run_step3
 from summarizer.qa import ask
-from summarizer.llm import SummaryResult, SectionSummary
+from summarizer.llm import SummaryResult, SectionSummary, configure_llm
 
 from eval.metrics.rouge_score import compute_rouge
 from eval.metrics.numerical_accuracy import compute_numerical_accuracy
@@ -324,7 +356,22 @@ def main():
                         help="BM25 검색 비활성화 (섹션·청크 BM25 모두 OFF, overall fallback만 사용) — BM25 도입 전 기준값 측정용")
     parser.add_argument("--no-dense", action="store_true",
                         help="Dense(Qdrant) 검색 비활성화 — BM25 단독 측정용. README 시점과 동일 조건 재현 가능.")
+    # #127 LLM 토글 — 평가 시 측정 대상 LLM 모델 자유 설정
+    parser.add_argument("--llm-model", type=str, default=None,
+                        help="평가 시 사용할 LLM 모델 ID (예: openai/gpt-5-mini, moonshotai/kimi-k2.5, deepseek/deepseek-v3.2, x-ai/grok-4.20). 미지정 시 기본 GPT-5.2.")
+    parser.add_argument("--llm-base-url", type=str, default=None,
+                        help="OpenAI-호환 endpoint base URL (예: https://openrouter.ai/api/v1). 미지정 시 OpenAI 기본.")
+    parser.add_argument("--llm-api-key-env", type=str, default="OPENAI_API_KEY",
+                        help="LLM API 키를 읽을 환경변수 이름. 기본 OPENAI_API_KEY, OpenRouter 경유 시 OPENROUTER_API_KEY.")
     args = parser.parse_args()
+
+    # #127 LLM 재설정 — 인자 명시 시에만 호출. 미지정 시 기존 GPT-5.2 + OpenAI 직결 동작 유지.
+    if args.llm_model or args.llm_base_url or args.llm_api_key_env != "OPENAI_API_KEY":
+        configure_llm(
+            model=args.llm_model,
+            base_url=args.llm_base_url,
+            api_key_env=args.llm_api_key_env,
+        )
 
     qa_pairs = json.loads(QA_PATH.read_text(encoding="utf-8"))
     logger.info("QA 쌍 로드: %d개", len(qa_pairs))
