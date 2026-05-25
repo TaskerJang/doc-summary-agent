@@ -44,6 +44,8 @@ class LLMConfig:
 # 모듈 레벨 상태 — configure_llm()으로 재설정 가능
 _active_client: AsyncOpenAI = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 _active_model: str = MODEL
+# OpenRouter 경유 여부 — extra_body 전달 분기용
+_use_openrouter_extras: bool = False
 
 
 def configure_llm(
@@ -62,16 +64,18 @@ def configure_llm(
 
     호출 안 하면 모듈 import 시점의 기본값 (gpt-5.2 + OpenAI 직결) 유지 — prod 영향 0.
     """
-    global _active_client, _active_model
+    global _active_client, _active_model, _use_openrouter_extras
     api_key = os.getenv(api_key_env)
     if not api_key:
         raise RuntimeError(f"환경변수 {api_key_env} 미설정 — LLM 재설정 불가")
     _active_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     if model is not None:
         _active_model = model
+    # OpenRouter 경유면 extra_body (reasoning OFF) 박기
+    _use_openrouter_extras = base_url is not None and "openrouter" in base_url.lower()
     logger.info(
-        "LLM 재설정: model=%s base_url=%s api_key_env=%s",
-        _active_model, base_url, api_key_env,
+        "LLM 재설정: model=%s base_url=%s api_key_env=%s openrouter_extras=%s",
+        _active_model, base_url, api_key_env, _use_openrouter_extras,
     )
 
 # ── AsyncOpenAI 클라이언트 (하위 호환 alias) ──────────────
@@ -126,13 +130,42 @@ def _load_system_prompt(is_image_based: bool) -> str:
 # ── Reasoning OFF for OpenRouter reasoning models ──────────
 # Kimi K2.5, DeepSeek V3.2, GPT-5 등 reasoning 모델 박힌 케이스에서
 # thinking tokens 가 max_tokens 다 박아버리고 실제 출력은 빈 문자열 박힘.
-# OpenRouter 의 reasoning 파라미터로 reasoning 자체를 OFF 박아 출력 보장.
-# OpenAI 직결 시에는 extra_body 무시되므로 prod 경로 영향 0.
+#
+# OpenRouter 의 reasoning 파라미터 3가지:
+#   - enabled: false  → reasoning 자체 OFF (Anthropic 일부 모델 지원)
+#   - exclude: true   → reasoning 응답에 박되 client 전달 안 함
+#   - max_tokens: 0   → reasoning tokens 0 박기 (가장 확실, 모든 모델 호환)
+#
+# Kimi K2.5 에서 enabled: false 박은 게 안 박힌 케이스 박혀서, 
+# max_tokens: 0 박는 게 안전. 만약 모델이 max_tokens: 0 지원 안 박으면
+# enabled: false 박힌 게 fallback 박힘.
 _REASONING_OFF_BODY = {
     "reasoning": {
         "enabled": False,
+        "max_tokens": 0,
+        "exclude": True,
+    },
+    # provider routing — Kimi 같은 모델이 여러 provider 박혀있을 때
+    # reasoning 미지원 provider 박혀있으면 그쪽 박힘
+    "provider": {
+        "order": ["moonshot", "deepinfra", "together"],
+        "allow_fallbacks": True,
     },
 }
+
+
+def _build_call_kwargs(messages: list[dict], max_tokens: int) -> dict:
+    """LLM 호출 kwargs 박기. OpenRouter 경유면 extra_body 박음."""
+    kwargs: dict = {
+        "model": _active_model,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_completion_tokens": max_tokens,
+        "timeout": TIMEOUT,
+    }
+    if _use_openrouter_extras:
+        kwargs["extra_body"] = _REASONING_OFF_BODY
+    return kwargs
 
 
 # ── 재시도 데코레이터 ──────────────────────────────────────
@@ -148,19 +181,35 @@ async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
     configure_llm() 호출 안 한 상태면 기본 GPT-5.2 + OpenAI 직결.
     호출했다면 그 설정대로 동작.
 
-    extra_body 의 reasoning OFF 박힘 — OpenRouter 의 reasoning model
-    (Kimi K2.5, DeepSeek V3.2 등) 에서 thinking tokens 가 max_tokens
-    다 박아버리고 출력 빈 문자열 박는 문제 방지. OpenAI 직결은 무시.
+    OpenRouter 경유면 extra_body 박혀서 reasoning OFF + provider routing 적용.
+    OpenAI 직결은 extra_body 미적용 — prod 경로 영향 0.
+
+    빈 응답 진단:
+    - content 가 비어있으면 finish_reason 박혀서 logger.warning 박기
+    - reasoning_content / reasoning 필드 fallback 시도
     """
-    response = await _active_client.chat.completions.create(
-        model=_active_model,
-        messages=messages,
-        temperature=0.3,
-        max_completion_tokens=max_tokens,
-        timeout=TIMEOUT,
-        extra_body=_REASONING_OFF_BODY,
-    )
-    return response.choices[0].message.content or ""
+    call_kwargs = _build_call_kwargs(messages, max_tokens)
+    response = await _active_client.chat.completions.create(**call_kwargs)
+
+    msg = response.choices[0].message if response.choices else None
+    raw = (msg.content if msg else "") or ""
+
+    if not raw.strip():
+        # 빈 응답 진단 — finish_reason / reasoning 필드 fallback
+        finish_reason = response.choices[0].finish_reason if response.choices else "?"
+        reasoning_content = getattr(msg, "reasoning_content", None) if msg else None
+        reasoning = getattr(msg, "reasoning", None) if msg else None
+        logger.warning(
+            "LLM 빈 content (model=%s finish_reason=%s) — fallback 시도",
+            _active_model, finish_reason,
+        )
+        # reasoning_content 안에 실제 답변 박혀있으면 그거 박기
+        if reasoning_content and reasoning_content.strip():
+            return reasoning_content
+        if reasoning and reasoning.strip():
+            return reasoning
+
+    return raw
 
 
 # ── Map 단계: 청크 → 섹션 요약 (Semaphore 보호) ───────────
