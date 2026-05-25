@@ -26,6 +26,8 @@ _active_judge_client: OpenAI = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 _active_judge_model: str = DEFAULT_MODEL
 # OpenAI 외 endpoint (OpenRouter 등) 사용 시 strict JSON schema 비호환 가능 → fallback 플래그
 _judge_strict_schema_supported: bool = True
+# OpenRouter 경유 여부 — extra_body 분기용
+_use_openrouter_extras: bool = False
 
 
 def configure_judge_llm(
@@ -47,7 +49,7 @@ def configure_judge_llm(
     OpenAI 외 endpoint (OpenRouter Claude 등) 사용 시 strict JSON schema 비호환 가능 →
     자동으로 fallback 플래그 set (첫 호출에서 BadRequestError 잡으면 schema 완화).
     """
-    global _active_judge_client, _active_judge_model, _judge_strict_schema_supported
+    global _active_judge_client, _active_judge_model, _judge_strict_schema_supported, _use_openrouter_extras
     api_key = os.getenv(api_key_env)
     if not api_key:
         raise RuntimeError(f"환경변수 {api_key_env} 미설정 — Judge LLM 재설정 불가")
@@ -56,15 +58,31 @@ def configure_judge_llm(
         _active_judge_model = model
     # base_url 명시 시 — OpenAI 외 endpoint → strict schema 위험. 첫 호출에서 동적 fallback.
     _judge_strict_schema_supported = (base_url is None)
+    # OpenRouter 경유면 extra_body (reasoning OFF) 박기
+    _use_openrouter_extras = base_url is not None and "openrouter" in base_url.lower()
     logger.info(
-        "Judge LLM 재설정: model=%s base_url=%s api_key_env=%s strict_schema=%s",
-        _active_judge_model, base_url, api_key_env, _judge_strict_schema_supported,
+        "Judge LLM 재설정: model=%s base_url=%s api_key_env=%s strict_schema=%s openrouter=%s",
+        _active_judge_model, base_url, api_key_env,
+        _judge_strict_schema_supported, _use_openrouter_extras,
     )
 
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 FAITHFULNESS_PROMPT           = (_PROMPTS_DIR / "faithfulness_v1.md").read_text(encoding="utf-8")
 NUMERICAL_FAITHFULNESS_PROMPT = (_PROMPTS_DIR / "numerical_faithfulness_v1.md").read_text(encoding="utf-8")
+
+
+# ── Reasoning OFF for OpenRouter reasoning models ──────────
+# Kimi K2.5 / claude-haiku-4.5 등 reasoning model 박힐 때
+# enabled: false 박은 게 안 박힌 케이스 발견 — max_tokens: 0 + exclude: true
+# 박아서 reasoning tokens 자체 0 박기.
+_REASONING_OFF_BODY = {
+    "reasoning": {
+        "enabled": False,
+        "max_tokens": 0,
+        "exclude": True,
+    },
+}
 
 
 def _relax_schema(response_format: dict) -> dict:
@@ -107,7 +125,8 @@ def _call_api(prompt: str, response_format: dict) -> dict:
     Model-specific 분기:
     - OpenAI 네이티브 (gpt-*, o-series) → reasoning_effort="low" 전달
     - OpenRouter 경유 Anthropic/DeepSeek/Moonshot/xAI → reasoning_effort 제거 +
-      `extra_body={"reasoning": {"enabled": False}}` 로 thinking 모드 명시적 OFF
+      `extra_body={"reasoning": {"enabled": False, "max_tokens": 0, "exclude": True}}`
+      로 thinking 모드 명시적 OFF (3중 안전)
       (참고: Claude OpenRouter는 reasoning_effort 무시 + thinking ON 시 content 빈 문자열 반환)
     - max_completion_tokens: 2000 (기존 500 → thinking 토큰 여유 확보)
 
@@ -128,15 +147,15 @@ def _call_api(prompt: str, response_format: dict) -> dict:
         "messages": [{"role": "user", "content": prompt}],
         "max_completion_tokens": 2000,  # 500 → 2000 (thinking 토큰 여유)
         "response_format": rf,
-        "timeout": 30,
+        "timeout": 60,  # 30 → 60s (reasoning 모델 대응)
     }
     if _is_openai_native_model(_active_judge_model):
         # OpenAI 네이티브만 reasoning_effort 지원
         call_kwargs["reasoning_effort"] = "low"
-    else:
-        # Anthropic 등은 reasoning 명시적 OFF (OpenRouter unified reasoning 파라미터)
-        # reasoning_effort 인자 자체를 보내지 않음 + extra_body로 reasoning disable
-        call_kwargs["extra_body"] = {"reasoning": {"enabled": False}}
+    elif _use_openrouter_extras:
+        # OpenRouter 경유 — reasoning 3중 OFF 박기
+        # enabled: false (Anthropic) + max_tokens: 0 (모든 모델) + exclude: true (응답 전달 X)
+        call_kwargs["extra_body"] = _REASONING_OFF_BODY
 
     try:
         response = _active_judge_client.chat.completions.create(**call_kwargs)
@@ -175,16 +194,17 @@ def _call_api(prompt: str, response_format: dict) -> dict:
             (reasoning or "")[:200] if reasoning else None,
         )
         # reasoning_content 안에 JSON이 들어있을 수도 있어 fallback 시도
-        if reasoning_content and "{" in reasoning_content:
-            try:
-                # 첫 { 부터 마지막 } 까지 추출 시도
-                start = reasoning_content.find("{")
-                end = reasoning_content.rfind("}")
-                if start >= 0 and end > start:
-                    candidate = reasoning_content[start:end+1]
-                    return json.loads(candidate)
-            except (json.JSONDecodeError, ValueError):
-                pass
+        for candidate_field in (reasoning_content, reasoning):
+            if candidate_field and "{" in candidate_field:
+                try:
+                    # 첫 { 부터 마지막 } 까지 추출 시도
+                    start = candidate_field.find("{")
+                    end = candidate_field.rfind("}")
+                    if start >= 0 and end > start:
+                        candidate = candidate_field[start:end+1]
+                        return json.loads(candidate)
+                except (json.JSONDecodeError, ValueError):
+                    continue
         return {}
 
     # 마크다운 코드 블록 감싸기 (```json ... ```) 자동 제거
