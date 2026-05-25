@@ -77,6 +77,24 @@ def _relax_schema(response_format: dict) -> dict:
     return {"type": "json_object"}
 
 
+def _is_openai_native_model(model: str) -> bool:
+    """OpenAI 네이티브 모델인지 판단 (#127 reasoning_effort 분기용).
+
+    OpenAI 네이티브: gpt-*, o1, o3, o4 등 → reasoning_effort 지원
+    OpenRouter 경유 OpenAI: openai/gpt-* → reasoning_effort 지원
+
+    OpenRouter 경유 Anthropic/DeepSeek/Moonshot/xAI 등 → reasoning_effort 미지원 또는
+    무시되어 content가 빈 문자열로 반환되는 케이스 다수 (LibreChat #9739 등 참고).
+    """
+    m = model.lower()
+    # OpenAI 직결 또는 OpenRouter 경유 OpenAI
+    if m.startswith("gpt-") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
+        return True
+    if m.startswith("openai/"):
+        return True
+    return False
+
+
 @retry(
     retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError)),
     wait=wait_exponential(multiplier=1, min=2, max=8),
@@ -86,8 +104,17 @@ def _relax_schema(response_format: dict) -> dict:
 def _call_api(prompt: str, response_format: dict) -> dict:
     """Judge LLM 호출 — _active_judge_client / _active_judge_model 사용 (#127).
 
+    Model-specific 분기:
+    - OpenAI 네이티브 (gpt-*, o-series) → reasoning_effort="low" 전달
+    - OpenRouter 경유 Anthropic/DeepSeek/Moonshot/xAI → reasoning_effort 제거 +
+      `extra_body={"reasoning": {"enabled": False}}` 로 thinking 모드 명시적 OFF
+      (참고: Claude OpenRouter는 reasoning_effort 무시 + thinking ON 시 content 빈 문자열 반환)
+    - max_completion_tokens: 2000 (기존 500 → thinking 토큰 여유 확보)
+
     strict json_schema 비호환 endpoint에서 첫 BadRequestError 발생 시
     _judge_strict_schema_supported를 False로 set → 이후 호출은 json_object로 fallback.
+
+    빈 응답 진단: content가 비어있으면 finish_reason과 함께 raw response 일부를 logger.warning으로 출력.
     """
     global _judge_strict_schema_supported
     import json
@@ -95,15 +122,24 @@ def _call_api(prompt: str, response_format: dict) -> dict:
     # 비호환 endpoint면 처음부터 json_object 모드
     rf = response_format if _judge_strict_schema_supported else _relax_schema(response_format)
 
+    # Model-specific 파라미터 분기 (#127 C7)
+    call_kwargs = {
+        "model": _active_judge_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_completion_tokens": 2000,  # 500 → 2000 (thinking 토큰 여유)
+        "response_format": rf,
+        "timeout": 30,
+    }
+    if _is_openai_native_model(_active_judge_model):
+        # OpenAI 네이티브만 reasoning_effort 지원
+        call_kwargs["reasoning_effort"] = "low"
+    else:
+        # Anthropic 등은 reasoning 명시적 OFF (OpenRouter unified reasoning 파라미터)
+        # reasoning_effort 인자 자체를 보내지 않음 + extra_body로 reasoning disable
+        call_kwargs["extra_body"] = {"reasoning": {"enabled": False}}
+
     try:
-        response = _active_judge_client.chat.completions.create(
-            model=_active_judge_model,
-            messages=[{"role": "user", "content": prompt}],
-            reasoning_effort="low",
-            max_completion_tokens=500,
-            response_format=rf,
-            timeout=30,
-        )
+        response = _active_judge_client.chat.completions.create(**call_kwargs)
     except BadRequestError as e:
         # strict json_schema 미지원 endpoint 감지 → fallback + 1회 재시도
         err_msg = str(e).lower()
@@ -113,20 +149,52 @@ def _call_api(prompt: str, response_format: dict) -> dict:
                     "Judge model가 strict json_schema 미지원 → json_object로 fallback: %s", e
                 )
                 _judge_strict_schema_supported = False
-                response = _active_judge_client.chat.completions.create(
-                    model=_active_judge_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    reasoning_effort="low",
-                    max_completion_tokens=500,
-                    response_format=_relax_schema(response_format),
-                    timeout=30,
-                )
+                call_kwargs["response_format"] = _relax_schema(response_format)
+                response = _active_judge_client.chat.completions.create(**call_kwargs)
             else:
                 raise
         else:
             raise
 
-    return json.loads(response.choices[0].message.content or "{}")
+    # 응답 content 추출 + 빈 응답 진단 (#127 C7)
+    raw_content = response.choices[0].message.content if response.choices else ""
+    raw_content = (raw_content or "").strip()
+
+    if not raw_content:
+        # 빈 응답 — 진단 정보 출력
+        finish_reason = response.choices[0].finish_reason if response.choices else "?"
+        # 일부 모델은 reasoning을 별도 필드로 반환 → 그 경우 fallback으로 추출
+        msg = response.choices[0].message if response.choices else None
+        reasoning_content = getattr(msg, "reasoning_content", None) if msg else None
+        reasoning = getattr(msg, "reasoning", None) if msg else None
+        logger.warning(
+            "Judge 응답 빈 content (model=%s finish_reason=%s) — "
+            "reasoning_content=%s reasoning=%s",
+            _active_judge_model, finish_reason,
+            (reasoning_content or "")[:200] if reasoning_content else None,
+            (reasoning or "")[:200] if reasoning else None,
+        )
+        # reasoning_content 안에 JSON이 들어있을 수도 있어 fallback 시도
+        if reasoning_content and "{" in reasoning_content:
+            try:
+                # 첫 { 부터 마지막 } 까지 추출 시도
+                start = reasoning_content.find("{")
+                end = reasoning_content.rfind("}")
+                if start >= 0 and end > start:
+                    candidate = reasoning_content[start:end+1]
+                    return json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return {}
+
+    # 마크다운 코드 블록 감싸기 (```json ... ```) 자동 제거
+    if raw_content.startswith("```"):
+        raw_content = raw_content.split("```")[1]
+        if raw_content.startswith("json"):
+            raw_content = raw_content[4:]
+        raw_content = raw_content.strip()
+
+    return json.loads(raw_content)
 
 
 def judge_faithfulness(source: str, summary: str) -> dict:
