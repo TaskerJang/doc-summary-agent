@@ -18,11 +18,10 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-# ── 상수 ──────────────────────────────────────────────────
+# ── 상수 ──────────────────────────────────────────
 MODEL          = "gpt-5.2"
-TIMEOUT        = 60   # reasoning 모델 대응 — 30 → 60s 박음
+TIMEOUT        = 60   # reasoning 모델 대응 — 30 → 60s
 # chunk_size=700 기준 청크 수 감소 → Semaphore 상한도 16으로 상향
-# rate limit 여유가 있으면 더 올릴 수 있음
 MAX_CONCURRENT = 16
 PROMPTS_DIR         = Path(__file__).parent / "prompts"
 SYSTEM_PROMPT_PATH  = PROMPTS_DIR / "system_v1.md"
@@ -30,7 +29,7 @@ OCR_WARNING_PATH    = PROMPTS_DIR / "ocr_warning_v1.md"
 CHUNK_PROMPT_PATH   = PROMPTS_DIR / "chunk_summary_v1.md"
 OVERALL_PROMPT_PATH = PROMPTS_DIR / "overall_summary_v1.md"
 
-# ── LLM Runtime Config (#127) ────────────────────────────
+# ── LLM Runtime Config (#127) ───────────────────────────
 # 평가 진입점에서 configure_llm()으로 토글 가능. 호출 안 하면 기본 GPT-5.2 + OpenAI 직결.
 # prod 경로 (Chainlit UI)는 configure_llm()을 호출하지 않으므로 영향 0.
 @dataclass
@@ -53,17 +52,7 @@ def configure_llm(
     base_url: str | None = None,
     api_key_env: str = "OPENAI_API_KEY",
 ) -> None:
-    """평가 진입점에서 LLM 호출을 일회성으로 재설정한다 (#127).
-
-    Args:
-        model: 사용할 모델 ID (예: "openai/gpt-5-mini", "moonshotai/kimi-k2.5").
-               None이면 기존 MODEL ("gpt-5.2") 유지.
-        base_url: OpenAI-호환 endpoint base URL. OpenRouter면 "https://openrouter.ai/api/v1".
-                  None이면 OpenAI 기본.
-        api_key_env: API 키를 읽을 환경변수 이름. 기본 "OPENAI_API_KEY".
-
-    호출 안 하면 모듈 import 시점의 기본값 (gpt-5.2 + OpenAI 직결) 유지 — prod 영향 0.
-    """
+    """평가 진입점에서 LLM 호출을 일회성으로 재설정 (#127)."""
     global _active_client, _active_model, _use_openrouter_extras
     api_key = os.getenv(api_key_env)
     if not api_key:
@@ -79,11 +68,9 @@ def configure_llm(
     )
 
 # ── AsyncOpenAI 클라이언트 (하위 호환 alias) ──────────────
-# 외부에서 `from summarizer.llm import client` 하는 경로가 있을 수 있어 유지.
-# 단, 실제 _call_api는 _active_client를 사용 — configure_llm() 시 토글됨.
 client = _active_client
 
-# ── Semaphore (모듈 레벨 — 이벤트 루프와 생명주기 공유) ────
+# ── Semaphore ──────────────────────────────────────────
 _sem: asyncio.Semaphore | None = None
 
 
@@ -95,12 +82,12 @@ def _get_sem() -> asyncio.Semaphore:
     return _sem
 
 
-# ── 출력 스키마 ────────────────────────────────────────────
+# ── 출력 스키마 ─────────────────────────────────────────
 class SectionSummary(BaseModel):
     section:    str
     bullets:    list[str]
     source:     str
-    chart_spec: dict[str, Any] | None = None  # 시각화 라우팅용 (이슈 #60)
+    chart_spec: dict[str, Any] | None = None
 
 
 class SummaryResult(BaseModel):
@@ -127,35 +114,51 @@ def _load_system_prompt(is_image_based: bool) -> str:
     return base
 
 
+# ── OpenAI 네이티브 모델 감지 ───────────────────────────
+def _is_openai_native_model(model: str) -> bool:
+    """OpenAI 네이티브 모델인지 판단 — OpenRouter 경유 OpenAI 도 포함.
+
+    OpenAI 모델은 reasoning 파라미터를 자체적으로 처리하므로 OpenRouter의
+    extra_body reasoning OFF 바디는 적용하지 않는다 (BadRequest 위험 회피).
+    """
+    m = model.lower()
+    if m.startswith("gpt-") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
+        return True
+    if m.startswith("openai/"):
+        return True
+    return False
+
+
 # ── Reasoning OFF for OpenRouter reasoning models ──────────
-# Kimi K2.5, DeepSeek V3.2, GPT-5 등 reasoning 모델 박힌 케이스에서
-# thinking tokens 가 max_tokens 다 박아버리고 실제 출력은 빈 문자열 박힘.
+# OpenRouter 공식 문서 (https://openrouter.ai/docs/use-cases/reasoning-tokens):
+#   - "max_tokens must be strictly higher than the reasoning budget"
+#   - "exclude: false. Default: false. All models support this."
+#   - "enabled": Default: inferred from `effort` or `max_tokens`
 #
-# OpenRouter 의 reasoning 파라미터 3가지:
-#   - enabled: false  → reasoning 자체 OFF (Anthropic 일부 모델 지원)
-#   - exclude: true   → reasoning 응답에 박되 client 전달 안 함
-#   - max_tokens: 0   → reasoning tokens 0 박기 (가장 확실, 모든 모델 호환)
+# 3중 안전 (공식 권장값 조합):
+#   - enabled: false  → reasoning 자체 OFF (Anthropic 일부 모델)
+#   - max_tokens: 1   → reasoning tokens 최소화 (모든 모델 호환, 공식 권장)
+#   - exclude: true   → reasoning 응답 전달 X ("All models support this")
 #
-# Kimi K2.5 에서 enabled: false 박은 게 안 박힌 케이스 박혀서, 
-# max_tokens: 0 박는 게 안전. 만약 모델이 max_tokens: 0 지원 안 박으면
-# enabled: false 박힌 게 fallback 박힘.
+# provider routing 제거 (이전 코드의 ["moonshot", "deepinfra", "together"]):
+#   - Kimi K2.5 전용 hack 이었고, OpenAI/Anthropic 으로 토글 시 fallback 더러웠음.
+#   - OpenRouter 의 자동 provider 선택이 더 안전.
 _REASONING_OFF_BODY = {
     "reasoning": {
         "enabled": False,
-        "max_tokens": 0,
+        "max_tokens": 1,
         "exclude": True,
-    },
-    # provider routing — Kimi 같은 모델이 여러 provider 박혀있을 때
-    # reasoning 미지원 provider 박혀있으면 그쪽 박힘
-    "provider": {
-        "order": ["moonshot", "deepinfra", "together"],
-        "allow_fallbacks": True,
     },
 }
 
 
 def _build_call_kwargs(messages: list[dict], max_tokens: int) -> dict:
-    """LLM 호출 kwargs 박기. OpenRouter 경유면 extra_body 박음."""
+    """LLM 호출 kwargs. OpenRouter 경유 + 비-OpenAI 모델일 때만 extra_body 박음.
+
+    OpenAI 모델 (openai/gpt-5*, openai/gpt-4*, openai/o1, o3, o4) 은
+    reasoning 파라미터를 자체 처리하므로 extra_body 미적용.
+    Kimi/DeepSeek/Claude 등 OpenRouter 경유 reasoning 모델만 reasoning OFF 적용.
+    """
     kwargs: dict = {
         "model": _active_model,
         "messages": messages,
@@ -163,12 +166,12 @@ def _build_call_kwargs(messages: list[dict], max_tokens: int) -> dict:
         "max_completion_tokens": max_tokens,
         "timeout": TIMEOUT,
     }
-    if _use_openrouter_extras:
+    if _use_openrouter_extras and not _is_openai_native_model(_active_model):
         kwargs["extra_body"] = _REASONING_OFF_BODY
     return kwargs
 
 
-# ── 재시도 데코레이터 ──────────────────────────────────────
+# ── 재시도 데코레이터 ─────────────────────────────────────
 @retry(
     retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError)),
     wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -181,8 +184,9 @@ async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
     configure_llm() 호출 안 한 상태면 기본 GPT-5.2 + OpenAI 직결.
     호출했다면 그 설정대로 동작.
 
-    OpenRouter 경유면 extra_body 박혀서 reasoning OFF + provider routing 적용.
-    OpenAI 직결은 extra_body 미적용 — prod 경로 영향 0.
+    OpenRouter 경유 + 비-OpenAI 모델이면 extra_body 박혀서 reasoning OFF 적용.
+    OpenAI 모델 (openai/gpt-*, gpt-*, o-series) 은 extra_body 미적용 —
+    reasoning_effort 등은 OpenAI SDK 가 자체 처리.
 
     빈 응답 진단:
     - content 가 비어있으면 finish_reason 박혀서 logger.warning 박기
@@ -195,7 +199,6 @@ async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
     raw = (msg.content if msg else "") or ""
 
     if not raw.strip():
-        # 빈 응답 진단 — finish_reason / reasoning 필드 fallback
         finish_reason = response.choices[0].finish_reason if response.choices else "?"
         reasoning_content = getattr(msg, "reasoning_content", None) if msg else None
         reasoning = getattr(msg, "reasoning", None) if msg else None
@@ -203,7 +206,6 @@ async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
             "LLM 빈 content (model=%s finish_reason=%s) — fallback 시도",
             _active_model, finish_reason,
         )
-        # reasoning_content 안에 실제 답변 박혀있으면 그거 박기
         if reasoning_content and reasoning_content.strip():
             return reasoning_content
         if reasoning and reasoning.strip():
@@ -267,7 +269,7 @@ async def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | 
             return None
 
 
-# ── Reduce 단계: 섹션 요약 → 전체 요약 ────────────────────
+# ── Reduce 단계: 섹션 요약 → 전체 요약 ───────────────────────
 async def _summarize_overall(
     sections: list[SectionSummary],
     system_prompt: str,
