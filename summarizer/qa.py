@@ -182,7 +182,7 @@ async def _call_qa(user_prompt: str) -> str:
             {"role": "system", "content": _QA_SYSTEM_PROMPT},
             {"role": "user",   "content": user_prompt},
         ],
-        max_tokens=500,
+        max_tokens=3000,   # reasoning 모델 대응 — 추론+답변 토큰 동시 수용 (500 → 3000)
     )
 
 
