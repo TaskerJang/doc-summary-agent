@@ -153,11 +153,14 @@ _REASONING_OFF_BODY = {
 
 
 def _build_call_kwargs(messages: list[dict], max_tokens: int) -> dict:
-    """LLM 호출 kwargs. OpenRouter 경유 + 비-OpenAI 모델일 때만 extra_body 박음.
+    """LLM 호출 kwargs. 모델 종류에 따라 reasoning 토큰을 최소화한다.
 
-    OpenAI 모델 (openai/gpt-5*, openai/gpt-4*, openai/o1, o3, o4) 은
-    reasoning 파라미터를 자체 처리하므로 extra_body 미적용.
-    Kimi/DeepSeek/Claude 등 OpenRouter 경유 reasoning 모델만 reasoning OFF 적용.
+    gpt-5.x / o-series 는 reasoning 모델이라 제어 없이 호출하면 추론 토큰이
+    max_completion_tokens 예산을 잡아먹어 content 가 비거나, OpenRouter 가
+    message.reasoning 으로 실어보낸 CoT 가 답변으로 누출된다. 따라서:
+    - OpenAI reasoning 모델 (OpenRouter 경유): extra_body 의 reasoning.effort=minimal
+    - OpenAI reasoning 모델 (OpenAI 직결): 표준 reasoning_effort=minimal
+    - Kimi/DeepSeek/Claude 등 OpenRouter 경유 reasoning 모델: reasoning OFF body
     """
     kwargs: dict = {
         "model": _active_model,
@@ -166,7 +169,12 @@ def _build_call_kwargs(messages: list[dict], max_tokens: int) -> dict:
         "max_completion_tokens": max_tokens,
         "timeout": TIMEOUT,
     }
-    if _use_openrouter_extras and not _is_openai_native_model(_active_model):
+    if _is_openai_native_model(_active_model):
+        if _use_openrouter_extras:                  # openai/gpt-5.2 등 OpenRouter 경유
+            kwargs["extra_body"] = {"reasoning": {"effort": "minimal"}}
+        else:                                       # OpenAI 직결
+            kwargs["reasoning_effort"] = "minimal"
+    elif _use_openrouter_extras:                    # Kimi / DeepSeek / Claude
         kwargs["extra_body"] = _REASONING_OFF_BODY
     return kwargs
 
@@ -200,16 +208,13 @@ async def _call_api(messages: list[dict], max_tokens: int = 2000) -> str:
 
     if not raw.strip():
         finish_reason = response.choices[0].finish_reason if response.choices else "?"
-        reasoning_content = getattr(msg, "reasoning_content", None) if msg else None
-        reasoning = getattr(msg, "reasoning", None) if msg else None
         logger.warning(
-            "LLM 빈 content (model=%s finish_reason=%s) — fallback 시도",
+            "LLM 빈 content (model=%s finish_reason=%s) — '[답변 불가]' 처리",
             _active_model, finish_reason,
         )
-        if reasoning_content and reasoning_content.strip():
-            return reasoning_content
-        if reasoning and reasoning.strip():
-            return reasoning
+        # reasoning_content / reasoning 을 답으로 반환하지 않는다 — CoT 누출 차단.
+        # 빈 문자열은 judge JSON 파싱 Error 를 유발하므로 '[답변 불가]' 로 정규화.
+        return "[답변 불가]"
 
     return raw
 
