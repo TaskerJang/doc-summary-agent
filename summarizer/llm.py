@@ -237,7 +237,7 @@ async def _summarize_chunk(chunk: dict, system_prompt: str) -> SectionSummary | 
                     {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt},
                 ],
-                max_tokens=600,
+                max_tokens=2000,
             )
 
             raw = raw.strip()
@@ -299,7 +299,7 @@ async def _summarize_overall(
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
-            max_tokens=1000,
+            max_tokens=2500,
         )
 
         if not result or not result.strip():
