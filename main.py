@@ -14,7 +14,14 @@ import doc_parser
 from doc_parser.preprocessor import clean
 from doc_parser.metadata import extract
 from doc_parser.pdf import is_image_based_pdf
-from chunker.chunker import chunk, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
+from chunker.chunker import (
+    chunk,
+    get_last_chunk_stats,
+    ChunkStrategy,
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_STRATEGY,
+)
 from summarizer.llm import summarize, SummaryResult
 
 # ── 로깅 설정 ─────────────────────────────────────────────
@@ -101,21 +108,40 @@ def run_step2(
     step1_result: dict,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    strategy: ChunkStrategy = DEFAULT_STRATEGY,
+    strict: bool = False,
 ) -> dict:
     """
     Step 2: 청킹
-    Returns: step1_result + { chunks, chunk_count, chunk_error }
+    Returns: step1_result + { chunks, chunk_count, strategy, chunk_stats, chunk_error }
+
+    #136: strategy 로 청킹 전략을 강제 선택한다. 기본값 structural 은 기존 동작과 동일.
+    #138: strict=True 는 실험 모드 — SemanticChunker 조용한 fallback 을 차단한다.
+          prod 경로(CLI run(), ui/app.py)는 인자를 넘기지 않으므로 영향 없음.
     """
     result = dict(step1_result)
     clean_text = result.get("clean_text", "")
-    logger.info("Step 2 시작 — 청킹 (chunk_size=%s, chunk_overlap=%s)", chunk_size, chunk_overlap)
+    logger.info(
+        "Step 2 시작 — 청킹 (strategy=%s, strict=%s, chunk_size=%s, chunk_overlap=%s)",
+        strategy, strict, chunk_size, chunk_overlap,
+    )
 
     try:
-        chunks = chunk(clean_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        chunks = chunk(
+            clean_text,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            strategy=strategy,
+            strict=strict,
+        )
         result["chunks"] = chunks
         result["chunk_count"] = len(chunks)
         result["chunk_size"] = chunk_size
         result["chunk_overlap"] = chunk_overlap
+        result["strategy"] = strategy
+        # #136: 측정 결과 해석에 필요 — semantic_bypassed 가 크면
+        # "Semantic 전략을 쟀다" 는 주장 자체가 약해진다.
+        result["chunk_stats"] = get_last_chunk_stats()
         logger.info("청킹 완료 — 총 %d개", len(chunks))
     except Exception as e:
         logger.error("청킹 실패: %s", e, exc_info=True)
