@@ -32,6 +32,16 @@ eval/run_eval.py
     uv run python eval/run_eval.py --no-dense --tag bm25_only
     uv run python eval/run_eval.py --no-semantic --tag fast_dryrun  # bge-m3 끄기
 
+#136 청킹 전략 비교 — 전략 4종을 동일 평가셋에 붙인다:
+
+    uv run python eval/run_eval.py \\
+      --strategy fixed recursive semantic structural \\
+      --strict --chunk-size 700 --tag "chunking_strategy_cmp"
+
+`--strict` 는 SemanticChunker 조용한 fallback 을 차단한다 (#138). 이게 없으면
+strategy="semantic" 결과가 실제로는 recursive 결과일 수 있고, 그 상태로
+leaderboard 에 기록하면 결론 전체가 틀어진다.
+
 #127 LLM 토글 — OpenRouter 경유 4 모델 측정 + Claude Haiku 4.5 judge:
 
     # Kimi K2.5 측정 + Claude Haiku 4.5 judge
@@ -114,6 +124,8 @@ async def run_pipeline(
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     use_dense: bool = True,
+    strategy: str | None = None,
+    strict: bool = False,
 ) -> dict:
     """단일 문서에 대해 파이프라인 실행 후 결과 반환.
 
@@ -124,9 +136,13 @@ async def run_pipeline(
         use_dense: True면 step3 후 Qdrant에 청크 인덱싱하고 doc_id를
                    step3에 박아 evaluate_qa가 ask()에 전달하도록 한다.
                    False면 인덱싱 스킵 → ask()는 BM25 단독으로 동작.
+        strategy:  #136 청킹 전략. None이면 chunker 기본값(structural).
+        strict:    #138 실험 모드 — SemanticChunker 조용한 fallback 차단.
     """
-    logger.info("파이프라인 실행: %s (chunk_size=%s, chunk_overlap=%s, dense=%s)",
-                doc_path.name, chunk_size, chunk_overlap, use_dense)
+    logger.info(
+        "파이프라인 실행: %s (strategy=%s, strict=%s, chunk_size=%s, chunk_overlap=%s, dense=%s)",
+        doc_path.name, strategy, strict, chunk_size, chunk_overlap, use_dense,
+    )
 
     step1 = run_step1(doc_path)
     if step1.get("status") == "error":
@@ -137,6 +153,10 @@ async def run_pipeline(
         step2_kwargs["chunk_size"] = chunk_size
     if chunk_overlap is not None:
         step2_kwargs["chunk_overlap"] = chunk_overlap
+    if strategy is not None:
+        step2_kwargs["strategy"] = strategy
+    if strict:
+        step2_kwargs["strict"] = strict
 
     step2 = run_step2(step1, **step2_kwargs)
     if step2.get("status") == "error":
@@ -166,6 +186,8 @@ async def _run_pipeline_multi(
     chunk_size: int | None,
     chunk_overlap: int | None,
     use_dense: bool,
+    strategy: str | None = None,
+    strict: bool = False,
 ) -> dict | None:
     """multi-doc QA 용 파이프라인 — 여러 문서를 독립 실행 후 결과 병합.
 
@@ -185,10 +207,21 @@ async def _run_pipeline_multi(
     merged_overall_parts: list[str] = []
     is_image_based = False
     first_doc_id = None
+    # #136: 문서별 청킹 통계를 합산한다. multi-doc 에서도
+    # semantic_bypassed 비율을 알아야 결과 해석이 가능하다.
+    merged_stats: dict = {
+        "semantic_bypassed": 0,
+        "semantic_fallback": 0,
+        "table_chunks": 0,
+        "skipped_sections": 0,
+    }
 
     for doc_name in doc_names:
         doc_path = docs_dir / doc_name
-        step3 = await run_pipeline(doc_path, chunk_size, chunk_overlap, use_dense=use_dense)
+        step3 = await run_pipeline(
+            doc_path, chunk_size, chunk_overlap, use_dense=use_dense,
+            strategy=strategy, strict=strict,
+        )
         if step3.get("status") == "error":
             logger.error("multi-doc 내 문서 실패: %s", doc_name)
             return None
@@ -224,6 +257,10 @@ async def _run_pipeline_multi(
         if first_doc_id is None and step3.get("doc_id"):
             first_doc_id = step3.get("doc_id")
 
+        st = step3.get("chunk_stats") or {}
+        for k in merged_stats:
+            merged_stats[k] += st.get(k, 0) or 0
+
     merged_step3 = {
         "chunks": merged_chunks,
         "clean_text": "\n\n".join(merged_clean_text_parts),
@@ -234,6 +271,14 @@ async def _run_pipeline_multi(
         },
         "is_image_based": is_image_based,
         "status": "ok",
+        "strategy": strategy,
+        "chunk_stats": {
+            **merged_stats,
+            "strategy": strategy,
+            "strict": strict,
+            "total_chunks": len(merged_chunks),
+            "doc_count": len(doc_names),
+        },
     }
     if first_doc_id:
         merged_step3["doc_id"] = first_doc_id
@@ -357,6 +402,8 @@ async def run_eval(
     docs_dir: Path,
     chunk_sizes: list[int] | None = None,
     chunk_overlaps: list[int] | None = None,
+    strategies: list[str] | None = None,
+    strict: bool = False,
     filter_doc: str | None = None,
     use_bm25: bool = True,
     use_dense: bool = True,
@@ -373,6 +420,10 @@ async def run_eval(
         chunk_sizes = [None]
     if chunk_overlaps is None:
         chunk_overlaps = [None]
+    # #136: 미지정 시 [None] → chunker 기본값(structural) 단일 실행.
+    # 기존 동작과 완전히 동일해야 한다.
+    if strategies is None:
+        strategies = [None]
 
     all_results = []
 
@@ -402,37 +453,43 @@ async def run_eval(
             logger.warning("문서 없음 (single-doc): %s", doc_path)
             continue
 
-        for chunk_size in chunk_sizes:
-            for chunk_overlap in chunk_overlaps:
-                logger.info("=== single-doc | %s | cs=%s ov=%s bm25=%s dense=%s ===",
-                            doc_name, chunk_size, chunk_overlap, use_bm25, use_dense)
-                step3 = await run_pipeline(
-                    doc_path, chunk_size, chunk_overlap, use_dense=use_dense,
-                )
-                if step3.get("status") == "error":
-                    logger.error("파이프라인 실패: %s", step3)
-                    continue
-
-                summary = _to_summary_result(step3)
-                if not summary:
-                    logger.error("요약 결과 없음: %s", doc_name)
-                    continue
-
-                for qa in qas:
-                    result = await evaluate_qa(
-                        qa, summary, step3,
-                        use_bm25=use_bm25,
-                        use_semantic=use_semantic,
-                    )
-                    result["chunk_size"]    = chunk_size
-                    result["chunk_overlap"] = chunk_overlap
-                    result["doc_mode"]      = "single"
-                    all_results.append(result)
+        for strategy in strategies:
+            for chunk_size in chunk_sizes:
+                for chunk_overlap in chunk_overlaps:
                     logger.info(
-                        "QA [%s] ROUGE-L=%.3f Faithfulness=%s Correctness=%s",
-                        qa["id"], result["rougeL"], result["faithfulness"],
-                        result.get("answer_correctness"),
+                        "=== single-doc | %s | strategy=%s cs=%s ov=%s bm25=%s dense=%s ===",
+                        doc_name, strategy, chunk_size, chunk_overlap, use_bm25, use_dense,
                     )
+                    step3 = await run_pipeline(
+                        doc_path, chunk_size, chunk_overlap, use_dense=use_dense,
+                        strategy=strategy, strict=strict,
+                    )
+                    if step3.get("status") == "error":
+                        logger.error("파이프라인 실패: %s", step3)
+                        continue
+
+                    summary = _to_summary_result(step3)
+                    if not summary:
+                        logger.error("요약 결과 없음: %s", doc_name)
+                        continue
+
+                    for qa in qas:
+                        result = await evaluate_qa(
+                            qa, summary, step3,
+                            use_bm25=use_bm25,
+                            use_semantic=use_semantic,
+                        )
+                        result["chunk_size"]    = chunk_size
+                        result["chunk_overlap"] = chunk_overlap
+                        result["strategy"]      = step3.get("strategy", strategy)
+                        result["chunk_stats"]   = step3.get("chunk_stats")
+                        result["doc_mode"]      = "single"
+                        all_results.append(result)
+                        logger.info(
+                            "QA [%s] strategy=%s ROUGE-L=%.3f Faithfulness=%s Correctness=%s",
+                            qa["id"], result["strategy"], result["rougeL"],
+                            result["faithfulness"], result.get("answer_correctness"),
+                        )
 
     # ── multi-doc QA 처리 ──────────────────────────────────
     # 각 multi-doc QA 마다 콤마 split → 각 문서 step1~step3 → 결과 병합 → evaluate_qa
@@ -448,44 +505,50 @@ async def run_eval(
             logger.warning("multi-doc QA [%s] 문서 누락: %s — skip", qa["id"], missing)
             continue
 
-        for chunk_size in chunk_sizes:
-            for chunk_overlap in chunk_overlaps:
-                cache_key = (tuple(sorted(doc_names)), chunk_size, chunk_overlap)
+        for strategy in strategies:
+            for chunk_size in chunk_sizes:
+                for chunk_overlap in chunk_overlaps:
+                    # #136: 전략이 다르면 청크 자체가 달라지므로 캐시 키에 포함해야 한다.
+                    cache_key = (tuple(sorted(doc_names)), strategy, chunk_size, chunk_overlap)
 
-                if cache_key in pipeline_cache:
-                    merged_step3 = pipeline_cache[cache_key]
-                    logger.info("multi-doc 캐시 hit — %d docs", len(doc_names))
-                else:
-                    logger.info("=== multi-doc | %d docs | cs=%s ov=%s ===",
-                                len(doc_names), chunk_size, chunk_overlap)
-                    merged_step3 = await _run_pipeline_multi(
-                        doc_names, docs_dir, chunk_size, chunk_overlap, use_dense,
-                    )
-                    if merged_step3 is None:
-                        logger.error("multi-doc 파이프라인 실패 — qa=%s", qa["id"])
+                    if cache_key in pipeline_cache:
+                        merged_step3 = pipeline_cache[cache_key]
+                        logger.info("multi-doc 캐시 hit — %d docs", len(doc_names))
+                    else:
+                        logger.info("=== multi-doc | %d docs | strategy=%s cs=%s ov=%s ===",
+                                    len(doc_names), strategy, chunk_size, chunk_overlap)
+                        merged_step3 = await _run_pipeline_multi(
+                            doc_names, docs_dir, chunk_size, chunk_overlap, use_dense,
+                            strategy=strategy, strict=strict,
+                        )
+                        if merged_step3 is None:
+                            logger.error("multi-doc 파이프라인 실패 — qa=%s", qa["id"])
+                            continue
+                        pipeline_cache[cache_key] = merged_step3
+
+                    summary = _to_summary_result(merged_step3)
+                    if not summary:
+                        logger.error("multi-doc 요약 결과 없음 — qa=%s", qa["id"])
                         continue
-                    pipeline_cache[cache_key] = merged_step3
 
-                summary = _to_summary_result(merged_step3)
-                if not summary:
-                    logger.error("multi-doc 요약 결과 없음 — qa=%s", qa["id"])
-                    continue
-
-                result = await evaluate_qa(
-                    qa, summary, merged_step3,
-                    use_bm25=use_bm25,
-                    use_semantic=use_semantic,
-                )
-                result["chunk_size"]    = chunk_size
-                result["chunk_overlap"] = chunk_overlap
-                result["doc_mode"]      = "multi"
-                result["doc_count"]     = len(doc_names)
-                all_results.append(result)
-                logger.info(
-                    "QA [%s] (multi-doc, %d docs) ROUGE-L=%.3f Faithfulness=%s Correctness=%s",
-                    qa["id"], len(doc_names), result["rougeL"], result["faithfulness"],
-                    result.get("answer_correctness"),
-                )
+                    result = await evaluate_qa(
+                        qa, summary, merged_step3,
+                        use_bm25=use_bm25,
+                        use_semantic=use_semantic,
+                    )
+                    result["chunk_size"]    = chunk_size
+                    result["chunk_overlap"] = chunk_overlap
+                    result["strategy"]      = merged_step3.get("strategy", strategy)
+                    result["chunk_stats"]   = merged_step3.get("chunk_stats")
+                    result["doc_mode"]      = "multi"
+                    result["doc_count"]     = len(doc_names)
+                    all_results.append(result)
+                    logger.info(
+                        "QA [%s] (multi-doc, %d docs) strategy=%s ROUGE-L=%.3f "
+                        "Faithfulness=%s Correctness=%s",
+                        qa["id"], len(doc_names), result["strategy"], result["rougeL"],
+                        result["faithfulness"], result.get("answer_correctness"),
+                    )
 
     return all_results
 
@@ -561,6 +624,61 @@ def print_summary(results: list[dict]) -> None:
         avg_a = sum(ac_vals) / len(ac_vals) if ac_vals else 0.0
         print(f"  {t:12s}: ROUGE-L={avg_r:.4f}  Correctness={avg_a:.2f}/5  (n={len(subset)})")
 
+    # ── #136 전략 × 질문유형 교차표 ────────────────────────
+    # 여기가 본체다. "어느 전략이 평균적으로 좋은가" 가 아니라
+    # "전략마다 어떤 질문에서 무너지는가" 를 봐야 한다. 평균만 보면 틀린 결론을 낸다.
+    strategies_seen = sorted(
+        {r.get("strategy") for r in results if r.get("strategy")},
+        key=lambda x: ["fixed", "recursive", "semantic", "structural"].index(x)
+        if x in ("fixed", "recursive", "semantic", "structural") else 99,
+    )
+
+    if len(strategies_seen) > 1:
+        types_sorted = sorted(set(r["type"] for r in results))
+
+        print("\n" + "=" * 78)
+        print("🧩 청킹 전략 × 질문유형 — Answer Correctness (1-5)")
+        print("=" * 78)
+        header = f"  {'strategy':<12s}" + "".join(f"{t:>13s}" for t in types_sorted) + f"{'전체':>10s}"
+        print(header)
+        for st in strategies_seen:
+            row = [r for r in results if r.get("strategy") == st]
+            line = f"  {st:<12s}"
+            for t in types_sorted:
+                sub = [r for r in row if r["type"] == t]
+                line += f"{_avg(sub, 'answer_correctness'):>13.2f}" if sub else f"{'-':>13s}"
+            line += f"{_avg(row, 'answer_correctness'):>10.2f}"
+            print(line)
+
+        print("\n🔢 청킹 전략 × 질문유형 — 수치 정확도")
+        print(header)
+        for st in strategies_seen:
+            row = [r for r in results if r.get("strategy") == st]
+            line = f"  {st:<12s}"
+            for t in types_sorted:
+                sub = [r for r in row if r["type"] == t]
+                line += f"{_avg(sub, 'num_accuracy'):>13.4f}" if sub else f"{'-':>13s}"
+            line += f"{_avg(row, 'num_accuracy'):>10.4f}"
+            print(line)
+
+        print("\n📐 전략별 청킹 통계 (측정 해석용)")
+        print(f"  {'strategy':<12s}{'청크수':>8s}{'평균길이':>10s}{'표청크':>8s}"
+              f"{'skip섹션':>10s}{'sem우회':>10s}{'fallback':>10s}")
+        for st in strategies_seen:
+            stats_list = [r.get("chunk_stats") for r in results
+                          if r.get("strategy") == st and r.get("chunk_stats")]
+            if not stats_list:
+                continue
+            # 같은 전략 안에서 문서마다 stats 가 다르므로 대표값으로 평균을 쓴다
+            def _s(key: str) -> float:
+                vals = [s.get(key, 0) or 0 for s in stats_list]
+                return sum(vals) / len(vals) if vals else 0.0
+            print(f"  {st:<12s}{_s('total_chunks'):>8.1f}{_s('avg_chunk_len'):>10.1f}"
+                  f"{_s('table_chunks'):>8.1f}{_s('skipped_sections'):>10.1f}"
+                  f"{_s('semantic_bypassed'):>10.1f}{_s('semantic_fallback'):>10.1f}")
+        print("\n  ※ sem우회 = 문장 수 부족으로 SemanticChunker 를 지나친 섹션 수.")
+        print("     이 값이 크면 'Semantic 전략을 쟀다' 는 주장 자체가 약해진다 (#138).")
+
     # ── #multi-doc single-doc / multi-doc 분리 결과 ──────
     single_results = [r for r in results if r.get("doc_mode") == "single"]
     multi_results  = [r for r in results if r.get("doc_mode") == "multi"]
@@ -590,6 +708,14 @@ def main():
                         help="청크 크기 목록 (예: 500 700 1000)")
     parser.add_argument("--chunk-overlap", nargs="+", type=int,
                         help="청크 오버랩 목록 (예: 50 100 200)")
+    # #136 청킹 전략 토글
+    parser.add_argument("--strategy", nargs="+", type=str, default=None,
+                        choices=["fixed", "recursive", "semantic", "structural"],
+                        help="청킹 전략 목록 (예: fixed recursive semantic structural). "
+                             "미지정 시 chunker 기본값(structural) 단일 실행")
+    parser.add_argument("--strict", action="store_true",
+                        help="#138 실험 모드 — SemanticChunker 조용한 fallback 차단. "
+                             "측정 오염 방지를 위해 전략 비교 시 반드시 켠다")
     parser.add_argument("--doc",  type=str, default="",
                         help="특정 문서만 평가 (파일명)")
     parser.add_argument("--tag",  type=str, default="",
@@ -643,6 +769,8 @@ def main():
         docs_dir=DOCS_DIR,
         chunk_sizes=args.chunk_size,
         chunk_overlaps=args.chunk_overlap,
+        strategies=args.strategy,
+        strict=args.strict,
         filter_doc=args.doc or None,
         use_bm25=not args.no_bm25,
         use_dense=not args.no_dense,
